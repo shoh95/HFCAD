@@ -150,7 +150,7 @@ class FuelCellSizing:
         self.OEMmisc = 0 #2086.39 #2574.09
         self.OEMmisc_ = 100#2000 # 1000 # 100
 
-        self.mpayload = 2000
+        self.mpayload = 2400
         self.rhobatt = 0.3 #[kWh/kg]
 
         #hybrid parameter
@@ -768,7 +768,8 @@ if __name__ == "__main__":
     plt.legend(loc='upper right')
     plt.grid(True)
     plt.savefig("Power Mission Profile.png", dpi=400)
-    plt.show()
+    # plt.show()
+    plt.close()
 
     ReqPow = np.array([y3, y2, y1])
     ReqPow = ReqPow.T
