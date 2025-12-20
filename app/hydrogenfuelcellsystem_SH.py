@@ -22,7 +22,7 @@ class FuelCellSizing:
     def __init__(self):
         # self.mtom_a = 8600
         # self.mtom_b = 0
-        self.MTOM = 8600
+        self.MTOM = 8500
         self.PFC1 = 200000 # unit(W)
         self.ptotal_a = 0
         self.ptotal_b = 0
@@ -85,11 +85,11 @@ class FuelCellSizing:
         self.rhocomp = 2000
 
         #Hydrogen fuel mass
-        self.Rtotal = 650000
+        self.Rtotal = 600000
         self.hcruise = 3000
         self.hTO = 0
         self.Vv = 7
-        self.Vclimb = 70
+        self.Vclimb = 100
         self.eta_prop = 0.8
         self.L_D1 = 14.5 # cruise Lift_to_Drag case1(climb),2(cruise),3(descent)
         self.L_D2 = 0
@@ -105,7 +105,7 @@ class FuelCellSizing:
         self.W_S_imp = Conversions.pa_psf(self, 2830.24, "psf")               ## SH:~$ Wing loading CHANGED(2830.24 -> 2755) to match origianl A/C Specification
         self.AR_wing = 10 
         self.t_c = 0.2
-        self.nz = 6.*1.5  ##3.8                           ################ SH:~$ 1.5 is TOO LOW -> n_ult = SF*(loadfactor) = 1.25*3
+        self.nz = 3*1.5  ##3.8                           ################ SH:~$ 1.5 is TOO LOW -> n_ult = SF*(loadfactor) = 1.25*3
         self.lc4 = 0
         self.lam = 0.42
         self.Vcruise = 110 # m/s
@@ -148,9 +148,9 @@ class FuelCellSizing:
 
         #Aircraft sizing
         self.OEMmisc = 0 #2086.39 #2574.09
-        self.OEMmisc_ = 100#2000 # 1000 # 100
+        self.OEMmisc_ = 0 #2000 # 1000 # 100
 
-        self.mpayload = 2400
+        self.mpayload = 2200
         self.rhobatt = 0.3 #[kWh/kg]
 
         #hybrid parameter
