@@ -32,7 +32,7 @@ class FuelCellSizing:
         self.volt_req = 700  # voltage to be produced by a fuel cell system
         self.h_cr = 3000
         self.mach_cr = 0.35
-        self.oversizing = 0.2
+        self.oversizing = 0.3
         self.beta = 1.05
         self.mdot_cruise = 0.
         self.MTOM = 8600
@@ -105,8 +105,8 @@ class FuelCellSizing:
         self.Rtotal = 500000
         self.hcruise = self.h_cr
         self.hTO = 0
-        self.Vv = 7
-        self.Vclimb = 90
+        self.Vv = 8
+        self.Vclimb = 110
         self.eta_prop = 0.8
         self.L_D1 = 14.5 # cruise Lift_to_Drag case1(climb),2(cruise),3(descent)
         self.L_D2 = 0
@@ -115,7 +115,7 @@ class FuelCellSizing:
 
 
         #Hydrogen tank geometry
-        self.Coversize = 4.5
+        self.Coversize = 3.0
 
         #Wing sizing(kg -> lb) *2.205
         # self.W_S_imp = 2830.24 # FPS unit>>>>>>>>>>>>>>>># SH:~$ ??? psf ? N/m2 ???
@@ -171,7 +171,7 @@ class FuelCellSizing:
         self.OEMmisc = 0 #2086.39 #2574.09
         self.OEMmisc_ = 0 #2000 # 1000 # 100
 
-        self.mpayload = 2000
+        self.mpayload = 2400
         self.rhobatt = 0.3 #[kWh/kg]
 
         #hybrid parameter
@@ -463,7 +463,8 @@ class FuelCellSizing:
 
         PPDU = (self.Pfuelcell_climb + self.Pheat_rejected1 + self.Pcooling_system1_fc) * self.eta_Converter + self.Pbat_climb
         
-        Pem = ((self.Pfuelcell_climb + self.Pheat_rejected1 + self.Pcooling_system1_fc) * self.eta_Converter + self.Pbat_climb) * self.eta_PDU * self.eta_Inverter
+        # Pem = ((self.Pfuelcell_climb + self.Pheat_rejected1 + self.Pcooling_system1_fc) * self.eta_Converter + self.Pbat_climb) * self.eta_PDU * self.eta_Inverter
+        Pem = (self.Pfuelcell_climb * self.eta_Converter + self.Pbat_climb) * self.eta_PDU * self.eta_Inverter
         
         self.mem = Pem / self.rhoem
         self.mPMAD = PPDU / self.rhopmad
@@ -477,7 +478,7 @@ class FuelCellSizing:
         # Calculate hydrogen fuel mass
 
         tclimb = (self.hcruise - self.hTO) / self.Vv
-        self.Vclimb = math.sqrt(self.Vv**2 + (0.7*self.Vcruise)**2)
+        self.Vclimb = math.sqrt(self.Vv**2 + (self.Vcruise)**2)
         Rclimb = self.Vclimb * tclimb
         Rdescent = Rclimb  # Assuming descent range equals climb range
         Rcruise = self.Rtotal - Rclimb - Rdescent
@@ -492,14 +493,14 @@ class FuelCellSizing:
         # self.mfuel = self.Mass_fuel_old/(1 - 0.1)
         # self.mfuel = self.mdot_cruise*self.Rtotal/pemfcsys_sizing_results['v_cr']
 
-        self.mfuel = self.mdot_cruise*Rcruise/pemfcsys_sizing_results['v_cr'] + self.mdot_climb*(Rclimb+Rdescent)/self.Vclimb
+        self.mfuel = self.mdot_cruise*(Rcruise + Rdescent)/pemfcsys_sizing_results['v_cr'] + self.mdot_climb*(Rclimb)/self.Vclimb
         print(f"mfuel: {self.mfuel:,.0f} kg")
         
         #Hydrogen tank sizing
 
         # Calculate hydrogen tank volume
-        VH2 = self.mfuel * self.Coversize / self.rho_H2
-        self.Vtankex = VH2
+        VH2_tank = self.mfuel* self.Coversize / self.eta_vol / self.rho_H2
+        self.Vtankex = VH2_tank
         Ltank = self.Vtankex / (math.pi * ((self.Dfus_imp / (2 * 3.281))**2))
         self.tanklength = Ltank
 
@@ -571,7 +572,7 @@ class FuelCellSizing:
         WEst.miscweightest(pow_max=380, N_f=6, N_m=2, S_cs=Conversions.m2_ft2(self, 8.36, "ft2"), Iyaw=4.49*10**6, R_kva=50, L_a=Conversions.meter_feet(self, 20, "ft"), N_gen=1, N_e=4, W_TO=Conversions.kg_pound(self, MTOM, "pound"), N_c=2, W_c=Conversions.kg_pound(self, 10*19, "pound"), S_f=self.Swet_fus_imp*23, N_pil=2)
 
         #Calculate aircraft sizing
-        self.OEMmisc = self.OEMmisc_ + self.W_HT + self.W_VT + self.W_lndgearmain + self.W_lndgearnose + self.W_flight_control + self.W_els + self.W_iae  + self.W_hydraulics + self.W_fur #+ self.W_motor
+        self.OEMmisc = self.OEMmisc_ + self.W_HT + self.W_VT + self.W_lndgearmain + self.W_lndgearnose + self.W_flight_control + self.W_els + self.W_iae  + self.W_hydraulics + self.W_fur
         self.OEM = self.OEMmisc + self.mpt + self.mtank + self.W_wing + self.W_fus + self.mbatt
         MTOM = self.OEM + self.mfuel + self.mpayload# + self.OEMmisc
         # print('MTOM: %f' %MTOM)
@@ -866,7 +867,7 @@ if __name__ == "__main__":
     ####################
 
     figs = pemfcsys_sizing_results['figs']
-    # figs[-1].show()
+    figs[-1].show()
     # figs[-1].write_image(f"../figs/pemfc_fig.png")
     save_path = Path(__file__).resolve().parent.parent / "figs" / "pemfc_fig.png"
     figs[-1].write_image(str(save_path))
