@@ -499,7 +499,7 @@ class FuelCellSizing:
         #Hydrogen tank sizing
 
         # Calculate hydrogen tank volume
-        VH2_tank = self.mfuel* self.Coversize / self.eta_vol / self.rho_H2
+        VH2_tank = self.mfuel * self.Coversize / self.rho_H2 / self.eta_vol  
         self.Vtankex = VH2_tank
         Ltank = self.Vtankex / (math.pi * ((self.Dfus_imp / (2 * 3.281))**2))
         self.tanklength = Ltank
