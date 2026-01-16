@@ -12,6 +12,7 @@ Note:
 
 from __future__ import annotations
 
+import time
 import math
 import logging
 from dataclasses import dataclass
@@ -1343,4 +1344,10 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    start_time = time.perf_counter()
     main()
+    end_time = time.perf_counter()
+    elapsed_time = end_time - start_time
+    print("\n\n=============================================================")
+    print(f'Execution time: {elapsed_time:.1f} seconds')
+    print("=============================================================")
