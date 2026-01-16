@@ -1,3 +1,4 @@
+# %%
 import math
 import matplotlib.pyplot as plt
 import numpy as np
@@ -886,6 +887,7 @@ if __name__ == "__main__":
     y2 = np.array(Power_fc)/1000
     y3 = y1 + y2
 
+    import matplotlib.pyplot as plt
     plt.plot(x,y1, linestyle='solid', color = 'gray', label = 'Battery')
     plt.plot(x,y2, linestyle='dashed', color = 'orange', label = 'Fuel Cell')
     plt.plot(x,y3, linestyle='solid', color = 'blue', label = 'Total')
@@ -897,6 +899,7 @@ if __name__ == "__main__":
     plt.legend(loc='upper right')
     plt.grid(True)
     plt.savefig("Power Mission Profile.png", dpi=400)
+    plt.show()
     plt.close()
     # plt.show()
 
@@ -907,3 +910,4 @@ if __name__ == "__main__":
     df = pd.DataFrame(ReqPow, columns=["ReqPow_AC", "ReqPow_FC", "ReqPow_Batt"])
     df = df.T
     df.to_excel("ReqPowDATA.xlsx", index=True)
+# %%
