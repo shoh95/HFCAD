@@ -867,7 +867,7 @@ if __name__ == "__main__":
     ####################
 
     figs = pemfcsys_sizing_results['figs']
-    figs[-1].show()
+    # figs[-1].show()
     # figs[-1].write_image(f"../figs/pemfc_fig.png")
     save_path = Path(__file__).resolve().parent.parent / "figs" / "pemfc_fig.png"
     figs[-1].write_image(str(save_path))
