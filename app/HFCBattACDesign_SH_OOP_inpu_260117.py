@@ -12,12 +12,15 @@ Note:
 
 from __future__ import annotations
 
+import argparse
+import configparser
+
 import time
 import math
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, fields, replace
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple, get_args, get_origin
 
 import numpy as np
 import pandas as pd
@@ -271,6 +274,266 @@ class DesignConfig:
     initial_mtom_kg: float = 8000.0
     initial_total_power_guess_w: float = 200_000.0
 
+
+# ============================
+# Input file handling
+# ============================
+
+
+def _parse_bool(value: str) -> bool:
+    v = value.strip().lower()
+    if v in {"1", "true", "yes", "y", "on"}:
+        return True
+    if v in {"0", "false", "no", "n", "off"}:
+        return False
+    raise ValueError(f"Invalid boolean value: {value!r}")
+
+
+def _split_list(value: str) -> List[str]:
+    """Split a comma/space separated list string into tokens."""
+
+    v = value.strip().replace("\n", " ")
+    # Remove common bracket wrappers
+    if (v.startswith("(") and v.endswith(")")) or (v.startswith("[") and v.endswith("]")):
+        v = v[1:-1].strip()
+
+    if "," in v:
+        parts = [p.strip() for p in v.split(",")]
+    else:
+        parts = [p.strip() for p in v.split()]
+
+    return [p for p in parts if p]
+
+
+def _coerce_value(raw: str, typ):
+    """Coerce a string value from the input file into the annotated field type."""
+    s = raw.strip()
+
+    # NEW: handle postponed annotations represented as strings (e.g., 'float', 'int', 'bool', 'str')
+    if isinstance(typ, str):
+        t = typ.replace(" ", "")
+        if t in ("float", "builtins.float"):
+            return float(s)
+        if t in ("int", "builtins.int"):
+            return int(float(s))  # tolerates "3000.0"
+        if t in ("str", "builtins.str"):
+            return s
+        if t in ("bool", "builtins.bool"):
+            v = s.lower()
+            if v in ("1", "true", "yes", "y", "on"):
+                return True
+            if v in ("0", "false", "no", "n", "off"):
+                return False
+            raise ValueError(f"Invalid boolean literal: {raw!r}")
+
+        # keep your existing tuple/list string handlers here too
+        if t in ("Tuple[float,...]", "tuple[float,...]"):
+            parts = [p.strip() for p in s.split(",") if p.strip() != ""]
+            return tuple(float(p) for p in parts)
+        if t in ("Tuple[int,...]", "tuple[int,...]"):
+            parts = [p.strip() for p in s.split(",") if p.strip() != ""]
+            return tuple(int(float(p)) for p in parts)
+        if t in ("List[float]", "list[float]"):
+            parts = [p.strip() for p in s.split(",") if p.strip() != ""]
+            return [float(p) for p in parts]
+        if t in ("List[int]", "list[int]"):
+            parts = [p.strip() for p in s.split(",") if p.strip() != ""]
+            return [int(float(p)) for p in parts]
+        
+
+    raw = raw.strip()
+
+    # Strip quotes for simple string values
+    if (raw.startswith('"') and raw.endswith('"')) or (raw.startswith("'") and raw.endswith("'")):
+        raw = raw[1:-1]
+
+    if typ is str:
+        return raw
+    if typ is float:
+        return float(raw)
+    if typ is int:
+        return int(raw)
+    if typ is bool:
+        return _parse_bool(raw)
+
+    origin = get_origin(typ)
+    args = get_args(typ)
+
+    if origin in (tuple, Tuple):
+        # Tuple[T, ...]
+        if len(args) == 2 and args[1] is Ellipsis:
+            elem_t = args[0]
+            return tuple(_coerce_value(p, elem_t) for p in _split_list(raw))
+        # Fixed-length tuple
+        parts = _split_list(raw)
+        if len(parts) != len(args):
+            raise ValueError(f"Expected {len(args)} values for {typ}, got {len(parts)}: {raw!r}")
+        return tuple(_coerce_value(p, t) for p, t in zip(parts, args))
+
+    raise TypeError(f"Unsupported config field type {typ!r} for value {raw!r}")
+
+
+def _update_dataclass_from_section(default_obj, section_name: str, section) -> object:
+    """Return a new dataclass instance with fields overridden from a config section."""
+
+    if not section:
+        return default_obj
+
+    allowed = {f.name for f in fields(default_obj)}
+    unknown = sorted(set(section.keys()) - allowed)
+    if unknown:
+        raise KeyError(
+            f"Unknown keys in section [{section_name}]: {', '.join(unknown)}. "
+            f"Allowed keys: {', '.join(sorted(allowed))}"
+        )
+
+    updates = {}
+    for f in fields(default_obj):
+        if f.name in section:
+            updates[f.name] = _coerce_value(section[f.name], f.type)
+
+    return replace(default_obj, **updates) if updates else default_obj
+
+
+def load_design_config(input_path: Path) -> DesignConfig:
+    """Load DesignConfig from an INI-style text file.
+
+    The file extension can be .txt; the syntax is INI-like:
+      [section]
+      key = value
+
+    Sections map to the nested dataclasses in DesignConfig:
+      mission, flight, fuel_cell_arch, fuel_cell_op, hybrid, eff, densities, p_w,
+      cooling, hydrogen, wing, fuselage, weights, solver, design
+    """
+
+    cfg_default = DesignConfig()
+
+    cp = configparser.ConfigParser(
+        interpolation=None,
+        inline_comment_prefixes=("#", ";"),
+    )
+    cp.optionxform = str
+
+    read_ok = cp.read(str(input_path))
+    if not read_ok:
+        raise FileNotFoundError(
+            f"Input file not found or unreadable: {input_path}. "
+            "Create it (or run with --write-template) and try again."
+        )
+
+    def section(name: str):
+        return cp[name] if cp.has_section(name) else None
+
+    mission = _update_dataclass_from_section(cfg_default.mission, "mission", section("mission"))
+    flight = _update_dataclass_from_section(cfg_default.flight, "flight", section("flight"))
+
+    fuel_cell_arch = _update_dataclass_from_section(cfg_default.fuel_cell_arch, "fuel_cell_arch", section("fuel_cell_arch"))
+    fuel_cell_op = _update_dataclass_from_section(cfg_default.fuel_cell_op, "fuel_cell_op", section("fuel_cell_op"))
+
+    hybrid = _update_dataclass_from_section(cfg_default.hybrid, "hybrid", section("hybrid"))
+    eff = _update_dataclass_from_section(cfg_default.eff, "eff", section("eff"))
+    densities = _update_dataclass_from_section(cfg_default.densities, "densities", section("densities"))
+    p_w = _update_dataclass_from_section(cfg_default.p_w, "p_w", section("p_w"))
+
+    cooling = _update_dataclass_from_section(cfg_default.cooling, "cooling", section("cooling"))
+    hydrogen = _update_dataclass_from_section(cfg_default.hydrogen, "hydrogen", section("hydrogen"))
+
+    wing = _update_dataclass_from_section(cfg_default.wing, "wing", section("wing"))
+    fuselage = _update_dataclass_from_section(cfg_default.fuselage, "fuselage", section("fuselage"))
+    weights = _update_dataclass_from_section(cfg_default.weights, "weights", section("weights"))
+
+    solver = _update_dataclass_from_section(cfg_default.solver, "solver", section("solver"))
+
+    # Top-level fields
+    design_section = section("design")
+    if design_section is not None:
+        allowed_design = {"initial_mtom_kg", "initial_total_power_guess_w"}
+        unknown_design = sorted(set(design_section.keys()) - allowed_design)
+        if unknown_design:
+            raise KeyError(
+                f"Unknown keys in section [design]: {', '.join(unknown_design)}. "
+                f"Allowed keys: {', '.join(sorted(allowed_design))}"
+            )
+
+    initial_mtom_kg = cfg_default.initial_mtom_kg
+    if design_section is not None and "initial_mtom_kg" in design_section:
+        initial_mtom_kg = float(design_section["initial_mtom_kg"])
+
+    initial_total_power_guess_w = cfg_default.initial_total_power_guess_w
+    if design_section is not None and "initial_total_power_guess_w" in design_section:
+        initial_total_power_guess_w = float(design_section["initial_total_power_guess_w"])
+
+    return DesignConfig(
+        mission=mission,
+        flight=flight,
+        fuel_cell_arch=fuel_cell_arch,
+        fuel_cell_op=fuel_cell_op,
+        hybrid=hybrid,
+        eff=eff,
+        densities=densities,
+        p_w=p_w,
+        cooling=cooling,
+        hydrogen=hydrogen,
+        wing=wing,
+        fuselage=fuselage,
+        weights=weights,
+        solver=solver,
+        initial_mtom_kg=float(initial_mtom_kg),
+        initial_total_power_guess_w=float(initial_total_power_guess_w),
+    )
+
+
+def write_input_template(path: Path, cfg: Optional[DesignConfig] = None) -> None:
+    """Write a complete input file template with the current default values."""
+
+    if cfg is None:
+        cfg = DesignConfig()
+
+    def fmt(v):
+        if isinstance(v, bool):
+            return "True" if v else "False"
+        if isinstance(v, float):
+            # Keep a stable representation without scientific notation unless necessary.
+            return f"{v:.12g}"
+        if isinstance(v, tuple):
+            return ", ".join(fmt(x) for x in v)
+        return str(v)
+
+    lines: List[str] = []
+    lines.append("# HFCAD input file (INI-style).")
+    lines.append("# Edit values as needed. Units are indicated in the parameter names.")
+    lines.append("# Lines starting with '#' or ';' are comments.")
+    lines.append("")
+
+    def section(name: str, obj) -> None:
+        lines.append(f"[{name}]")
+        for f in fields(obj):
+            lines.append(f"{f.name} = {fmt(getattr(obj, f.name))}")
+        lines.append("")
+
+    section("mission", cfg.mission)
+    section("flight", cfg.flight)
+    section("fuel_cell_arch", cfg.fuel_cell_arch)
+    section("fuel_cell_op", cfg.fuel_cell_op)
+    section("hybrid", cfg.hybrid)
+    section("eff", cfg.eff)
+    section("densities", cfg.densities)
+    section("p_w", cfg.p_w)
+    section("cooling", cfg.cooling)
+    section("hydrogen", cfg.hydrogen)
+    section("wing", cfg.wing)
+    section("fuselage", cfg.fuselage)
+    section("weights", cfg.weights)
+    section("solver", cfg.solver)
+
+    lines.append("[design]")
+    lines.append(f"initial_mtom_kg = {fmt(cfg.initial_mtom_kg)}")
+    lines.append(f"initial_total_power_guess_w = {fmt(cfg.initial_total_power_guess_w)}")
+    lines.append("")
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines), encoding="utf-8")
 
 # ============================
 # Result objects (dataclasses)
@@ -1036,7 +1299,7 @@ class HybridFuelCellAircraftDesign:
         phases: Dict[str, PhasePowerResult] = {}
 
         for outer_iter in range(1, cfg.solver.max_outer_iter + 1):
-            logger.info("\n======================================================")
+            logger.info("======================================================")
             logger.info(f"======================= ITER {outer_iter} =======================")
 
             # Cruise (FC only -> psi = 0)
@@ -1097,7 +1360,8 @@ class HybridFuelCellAircraftDesign:
                 cruise=phases["cruise"],
             )
 
-            logger.info(f"ptotal_climb: {phases['climb'].p_total_w/1000:,.0f} kW, mtom: {mass.mtom_kg:,.0f} kg")
+            logger.info("\n-----------------------")
+            logger.info(f"ptotal_climb: {phases['climb'].p_total_w/1000:,.0f} kW, mtom: {mass.mtom_kg:,.0f} kg\n\n")
 
             if abs(mass.mtom_kg - mtom) <= cfg.solver.mtom_tol_kg:
                 logger.info("\nCONVERGED")
@@ -1322,17 +1586,60 @@ def _print_summary(phases: Dict[str, PhasePowerResult], mass: MassBreakdown, cfg
     print("========================== END ==============================")
 
 
-def main() -> None:
+def main(argv: Optional[List[str]] = None) -> None:
     logging.basicConfig(level=logging.INFO, format="%(message)s")
 
-    cfg = DesignConfig()
+    default_input = Path(__file__).with_name("input_HFCAD.txt")
+
+    parser = argparse.ArgumentParser(
+        description="Hybrid Fuel-Cell/Battery Aircraft Design (HFCAD) - OOP",
+    )
+    parser.add_argument(
+        "-i",
+        "--input",
+        default=str(default_input),
+        help="Path to input file (INI-style). Default: input_HFCAD.txt next to this script.",
+    )
+    parser.add_argument(
+        "--outdir",
+        default=str(Path.cwd()),
+        help="Output directory for plots and ReqPowDATA.xlsx.",
+    )
+    parser.add_argument(
+        "--show-plot",
+        action="store_true",
+        help="Show the mission profile plot window.",
+    )
+    parser.add_argument(
+        "--write-template",
+        action="store_true",
+        help="Write a full template input file to --input and exit.",
+    )
+
+    args = parser.parse_args(argv)
+
+    input_path = Path(args.input).expanduser()
+    if args.write_template:
+        write_input_template(input_path, DesignConfig())
+        logger.info("Wrote template input file: %s", input_path)
+        return
+
+    if not input_path.exists():
+        raise FileNotFoundError(
+            f"Input file not found: {input_path}. "
+            "Run with --write-template to generate a template."
+        )
+
+    cfg = load_design_config(input_path)
 
     design = HybridFuelCellAircraftDesign(cfg)
     phases, mass = design.run()
 
     _print_summary(phases, mass, cfg)
 
-    out_dir = Path.cwd()
+    out_dir = Path(args.outdir).expanduser()
+    out_dir.mkdir(parents=True, exist_ok=True)
+
     writer = OutputWriter(cfg)
 
     # Fuel cell figure (per nacelle at design point)
@@ -1340,7 +1647,12 @@ def main() -> None:
     writer.write_pemfc_figure(nacelle_power_w=nacelle_power_w, out_dir=out_dir)
 
     # Mission profile plot and Excel
-    writer.write_mission_profile_outputs(phases=phases, mass=mass, out_dir=out_dir, show_plot=False)
+    writer.write_mission_profile_outputs(
+        phases=phases,
+        mass=mass,
+        out_dir=out_dir,
+        show_plot=bool(args.show_plot),
+    )
 
 
 if __name__ == "__main__":
