@@ -489,7 +489,7 @@ class FuelCellSystemModel:
 
         if verbose:
             try:
-                logger.info("Reynolds_number: %,.0f", rho * v_cr * 1.8 / mu)
+                logger.info(f"Reynolds_number: {rho * v_cr * 1.8 / mu:.0f}")
             except Exception:
                 pass
 
@@ -584,9 +584,9 @@ class FuelCellSystemModel:
         mdot_h2 = float(1.05e-8 * (float(power_comp) + float(power_fc_sys_w)) / volt_cell)
 
         if verbose:
-            logger.info("Stack prop output power: %,.0f kW, Pcomp: %,.1f kW", power_fc_sys_w / 1000, power_comp / 1000)
-            logger.info("Cell efficiency: %,.3f, Output efficiency: %,.3f", eta_cell, eta_fcsys)
-            logger.info("mdot_h2: %,.2f g/s", mdot_h2 * 1000)
+            logger.info(f"Stack prop output power: {power_fc_sys_w/1000:,.0f} kW, Pcomp: {power_comp/1000:,.1f} kW")
+            logger.info(f"Cell efficiency: {eta_cell:,.3f}, Output efficiency: {eta_fcsys:,.3f}")
+            logger.info(f"mdot_h2: {mdot_h2*1000:,.2f} g/s")
 
         return FuelCellSystemSizingResult(
             m_sys_kg=float(m_sys),
@@ -1036,7 +1036,7 @@ class HybridFuelCellAircraftDesign:
 
         for outer_iter in range(1, cfg.solver.max_outer_iter + 1):
             logger.info("======================================================")
-            logger.info("======================= ITER %s =======================", outer_iter)
+            logger.info(f"======================= ITER {outer_iter} =======================")
 
             # Cruise (FC only -> psi = 0)
             phases["cruise"] = self._phase_solver.solve(
@@ -1096,11 +1096,7 @@ class HybridFuelCellAircraftDesign:
                 cruise=phases["cruise"],
             )
 
-            logger.info(
-                "ptotal_climb: %,.0f kW, mtom: %,.0f kg",
-                phases["climb"].p_total_w / 1000.0,
-                mass.mtom_kg,
-            )
+            logger.info(f"ptotal_climb: {phases['climb'].p_total_w/1000:,.0f} kW, mtom: {mass.mtom_kg:,.0f} kg")
 
             if abs(mass.mtom_kg - mtom) <= cfg.solver.mtom_tol_kg:
                 logger.info("\nCONVERGED")
@@ -1151,7 +1147,7 @@ class OutputWriter:
         phases: Dict[str, PhasePowerResult],
         mass: MassBreakdown,
         out_dir: Path,
-        show_plot: bool = True,
+        show_plot: bool = False,
     ) -> None:
         """Reproduce legacy mission power plot and Excel export."""
 
@@ -1175,17 +1171,7 @@ class OutputWriter:
 
         pfc_cruise = phases["cruise"].p_total_w
 
-        logger.info(
-            "Pfuel_ready: %,.0f kW, Pfuel_taxing: %,.0f kW, Pfuel_climb: %,.0f kW, "
-            "Pfuel_cruise: %,.0f kW, Pfuel_cruise_charger: %,.0f kW, Pbat_climb: %,.0f kW, Pbat_charge: %,.0f kW",
-            pfc_ready / 1000.0,
-            pfc_taxing / 1000.0,
-            pfc_climb / 1000.0,
-            pfc_cruise / 1000.0,
-            pfc_cruise_charger / 1000.0,
-            pbat_climb / 1000.0,
-            pbat_charge / 1000.0,
-        )
+        logger.info(f"Pfuel_ready: {pfc_ready/1000:,.0f} kW, Pfuel_taxing: {pfc_taxing/1000:,.0f} kW, Pfuel_climb: {pfc_climb/1000:,.0f} kW, Pfuel_cruise: {pfc_cruise/1000:,.0f} kW, Pfuel_cruise_charger: {pfc_cruise_charger/1000:,.0f} kW, Pbat_climb: {pbat_climb/1000:,.0f} kW, Pbat_charge: {pbat_charge/1000:,.0f} kW")
 
         power_fc = [
             pfc_ready,
@@ -1353,7 +1339,7 @@ def main() -> None:
     writer.write_pemfc_figure(nacelle_power_w=nacelle_power_w, out_dir=out_dir)
 
     # Mission profile plot and Excel
-    writer.write_mission_profile_outputs(phases=phases, mass=mass, out_dir=out_dir, show_plot=True)
+    writer.write_mission_profile_outputs(phases=phases, mass=mass, out_dir=out_dir, show_plot=False)
 
 
 if __name__ == "__main__":
