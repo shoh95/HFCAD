@@ -120,7 +120,7 @@ class FuelCellSizing:
         #Wing sizing(kg -> lb) *2.205
         # self.W_S_imp = 2830.24 # FPS unit>>>>>>>>>>>>>>>># SH:~$ ??? psf ? N/m2 ???
         self.W_S_imp = Conversions.pa_psf(self, 2830.24, "psf")               ## SH:~$ Wing loading CHANGED(2830.24 -> 2755) to match origianl A/C Specification
-        self.AR_wing = 10 
+        self.AR_wing = 10
         self.t_c = 0.2
         self.nz = 3.*1.5  ##3.8                           ################ SH:~$ 1.5 is TOO LOW -> n_ult = SF*(loadfactor) = 1.25*3
         self.lc4 = 0
@@ -188,7 +188,7 @@ class FuelCellSizing:
         self.mair1 = 2.856e-7 * self.lamda_O2 * ((self.ptotal_a - self.Pbat_climb)/ self.eta_FC)        # SH:~$ place holder, no difference if it's zero
         self.Pcomp1 = 0 #self.mair1 * self.Cp_air * (self.Tt2-self.Tt1) / self.eta_em  # SH:~$ place holder, no difference if it's zero
 
-        
+
         self.Pheat_rejected1 = 0 #((1 / self.eta_FC) - 1) * (self.ptotal_a - self.Pbat_climb) / 1000       # SH:~$ place holder, no difference if it's zero
         self.Pcooling_system1_fc = 0 #(0.371 * self.Pheat_rejected1 + 1.33) * self.f_dT * 1000             # SH:~$ place holder, no difference if it's zero
 
@@ -228,7 +228,7 @@ class FuelCellSizing:
             # Calculate net electrical output power of fuel cell
             self.Pfuelcell_climb = (1/(self.eta_Inverter*self.eta_Motor*self.eta_PDU*self.eta_prop))*((1-self.psi_climb)/(self.psi_climb+self.eta_Converter*(1-self.psi_climb))) * Pshaft1
             self.Pbat_climb = (1/(self.eta_Inverter*self.eta_Motor*self.eta_PDU*self.eta_prop))*(self.psi_climb/(self.psi_climb+self.eta_Converter*(1-self.psi_climb))) * Pshaft1
-            
+
             Pelectricnet1 = self.Pfuelcell_climb + self.Pbat_climb
 
             power_fc_sys_parallel = (self.ptotal_a - self.Pbat_climb)/self.n_stacks_parallel         # + self.Pheat_rejected1 + self.Pcooling_system1_fc
@@ -242,7 +242,7 @@ class FuelCellSizing:
             self.Pheat_rejected1 = self.n_stacks_parallel*pemfcsys_sizing_results_climb['q_all']/1000
 
             self.mdot_climb = pemfcsys_sizing_results_climb['mdot_h2'] * self.n_stacks_parallel
-            
+
             # Calculate air mass flow for compressor
             # self.mair1 = 2.856e-7 * self.lamda_O2 * ((self.ptotal_a - self.Pbat_climb)/ self.eta_FC)
             # Calculate fuel cell power system power including compressor
@@ -251,7 +251,7 @@ class FuelCellSizing:
             # Calculate fuel cell power system power including cooling
             # self.Pheat_rejected1 = ((1 / self.eta_FC) - 1) * (self.ptotal_a - self.Pbat_climb) / 1000
             self.Pcooling_system1_fc = (0.371 * self.Pheat_rejected1 + 1.33) * self.f_dT * 1000
-            
+
             self.ptotal_b = Pelectricnet1 + self.Pcomp1 + self.Pcooling_system1_fc
             # print('Pshaft1: %.2f Pcomp1_fc: %.2f Pcooling_system1_fc: %.2f Pfuelcell_climb: %.2f Pbat_climb: %.2f Ptotal_climb: %.2f' %(Pshaft1, self.Pcomp1, self.Pcooling_system1_fc, self.Pfuelcell_climb, self.Pbat_climb, self.ptotal_b))
             # print(f"Pshaft1: {Pshaft1:,.2f}, Pcomp1_fc: {self.Pcomp1:,.2f}, Pcooling_system1_fc: {self.Pcooling_system1_fc:,.2f}, Pfuelcell_climb: {self.Pfuelcell_climb:,.2f}, Pbat_climb: {self.Pbat_climb:,.2f}, Ptotal_climb: {self.ptotal_b:,.2f}")
@@ -260,7 +260,7 @@ class FuelCellSizing:
                 print(f"----------------------- iter {iter} -----------------------")
                 print(f"Pshaft1: {Pshaft1/1000:,.0f} kW, Pcomp1_fc: {self.Pcomp1/1000:,.0f} kW, Pcooling_system1_fc: {self.Pcooling_system1_fc/1000:,.0f} kW, Pfuelcell_climb: {self.Pfuelcell_climb/1000:,.0f} kW, Pbat_climb: {self.Pbat_climb/1000:,.0f} kW, Ptotal_climb: {self.ptotal_b/1000:,.0f} kW")
                 break
-            else: 
+            else:
                 # Pshaft1 = MTOM_trial * 9.81 * self.P_W_climb
                 # Pshaft1 = self.ptotal_b
                 # MTOM_trial = self.ptotal_b / (9.81 * self.P_W_climb)
@@ -270,17 +270,17 @@ class FuelCellSizing:
                 self.ptotal_a = self.Pfuelcell_climb + self.Pcomp1 + self.Pcooling_system1_fc + self.Pbat_climb
                 # Pshaft1 = self.ptotal_b
                 iter += 1
-                
+
         return self.ptotal_b, MTOM_trial
 
     def cal_Ptotal_cruise(self, MTOM_trial, PFC2=5000000):
         self.ptotal_c = PFC2
         while True:
             #Calculate shaft power for flight based on MTOM and power-to-weight ratio
-            Pshaft2 = MTOM_trial * 9.81 * self.P_W_cruise 
+            Pshaft2 = MTOM_trial * 9.81 * self.P_W_cruise
             # Calculate net electrical output power of fuel cell
             self.Pfuelcell_cruise = (1/(self.eta_Inverter*self.eta_Motor*self.eta_PDU*self.eta_prop))*((1/self.eta_Converter)) * Pshaft2
-            
+
             Pelectricnet2 = self.Pfuelcell_cruise
 
             power_fc_sys_parallel = self.ptotal_c/self.n_stacks_parallel         # + self.Pheat_rejected1 + self.Pcooling_system1_fc
@@ -292,7 +292,7 @@ class FuelCellSizing:
 
             self.Pcomp2 = pemfcsys_sizing_results_cruise['power_comp'] * self.n_stacks_parallel
             Pheat_rejected2 = self.n_stacks_parallel*pemfcsys_sizing_results_cruise['q_all']/1000
-            
+
             # Calculate air mass flow for compressor
             # mair2 = 2.856e-7 * self.lamda_O2 * (self.ptotal_c/ self.eta_FC)
             # # Calculate fuel cell power system power including compressor
@@ -301,7 +301,7 @@ class FuelCellSizing:
             # Calculate fuel cell power system power including cooling
             # Pheat_rejected2 = ((1 / self.eta_FC) - 1) * self.ptotal_c/ 1000
             self.Pcooling_system2_fc = (0.371 * Pheat_rejected2 + 1.33) * self.f_dT * 1000
-            
+
             self.ptotal_d = Pelectricnet2 + self.Pcomp2 + self.Pcooling_system2_fc
 
 
@@ -315,7 +315,7 @@ class FuelCellSizing:
                 # self.ptotal_c = self.ptotal_d
                 print(f"cal_Ptotal_cruise")
                 self.ptotal_c = self.Pfuelcell_cruise + self.Pcomp2 + self.Pcooling_system2_fc
-            
+
 
         return self.ptotal_d, MTOM_trial
 
@@ -326,14 +326,14 @@ class FuelCellSizing:
         # self.ptotal_e = 5000000
         while True:
             #Calculate shaft power for flight based on MTOM and power-to-weight ratio
-            Pshaft3 = MTOM_trial * 9.81 * self.P_W_cruise 
+            Pshaft3 = MTOM_trial * 9.81 * self.P_W_cruise
             # Calculate net electrical output power of fuel cell
             self.Pfuelcell_cruise_charger = (1/(self.eta_Inverter*self.eta_Motor*self.eta_PDU*self.eta_prop))*((1-self.psi_cruise)/(self.psi_cruise+self.eta_Converter*(1-self.psi_cruise))) * Pshaft3      #SH: Positive
             self.Pbat_cruise_charger = (1/(self.eta_Inverter*self.eta_Motor*self.eta_PDU*self.eta_prop))*(self.psi_cruise/(self.psi_cruise+self.eta_Converter*(1-self.psi_cruise))) * Pshaft3               #SH: Negative
-            
+
             Pelectricnet3 = self.Pfuelcell_cruise_charger + abs(self.Pbat_cruise_charger)
 
-            
+
             # Calculate air mass flow for compressor
             # mair3 = 2.856e-7 * self.lamda_O2 * ((ptotal_e - self.Pbat_cruise_charger) / self.eta_FC)
             comp_bool = True
@@ -349,20 +349,20 @@ class FuelCellSizing:
             # Calculate fuel cell power system power including cooling
             # Pheat_rejected3 = ((1 / self.eta_FC) - 1) * (ptotal_e - self.Pbat_cruise_charger) / 1000
             # Pcooling_system3_fc = (0.371 * Pheat_rejected3 + 1.33) * self.f_dT * 1000
-            
+
             self.ptotal_f = Pelectricnet3 + self.Pcomp3 + Pcooling_system3_fc
 
 
             if abs(self.ptotal_f - self.ptotal_e) <= 100:
                 break
-            else: 
+            else:
                 # Pshaft3 = MTOM_trial * 9.81 * self.P_W_cruise
                 # MTOM_trial = ptotal_f / (9.81 * self.P_W_cruise)--
                 # self.P_W_cruise = self.ptotal_f / (MTOM_trial*9.81)
                 # self.ptotal_e = self.ptotal_f
                 print(f"cal_Ptotal_cruise_charger")
                 self.ptotal_e = self.Pfuelcell_cruise_charger + self.Pcomp3 + Pcooling_system3_fc + abs(self.Pbat_cruise_charger)
-                
+
         return self.ptotal_f, Pcooling_system3_fc, MTOM_trial
 
 
@@ -372,12 +372,12 @@ class FuelCellSizing:
         # self.ptotal_g = 5000000
         while True:
             #Calculate shaft power for flight based on MTOM and power-to-weight ratio
-            Pshaft4 = MTOM_trial * 9.81 * self.P_W_takeoff 
+            Pshaft4 = MTOM_trial * 9.81 * self.P_W_takeoff
             # Calculate net electrical output power of fuel cell
             #To account for the difference in net and gross the fuel cell
             self.Pfuelcell_takeoff = (1/(self.eta_Inverter*self.eta_Motor*self.eta_PDU*self.eta_prop))*((1-self.psi_takeoff)/(self.psi_takeoff+self.eta_Converter*(1-self.psi_takeoff))) * Pshaft4
             self.Pbat_takeoff = (1/(self.eta_Inverter*self.eta_Motor*self.eta_PDU*self.eta_prop))*(self.psi_takeoff/(self.psi_takeoff+self.eta_Converter*(1-self.psi_takeoff))) * Pshaft4
-            
+
             Pelectricnet4 = self.Pfuelcell_takeoff + self.Pbat_takeoff
 
             power_fc_sys_parallel = (self.ptotal_g - self.Pbat_takeoff)/self.n_stacks_parallel         # + self.Pheat_rejected1 + self.Pcooling_system1_fc
@@ -390,7 +390,7 @@ class FuelCellSizing:
 
             self.Pcomp4 = pemfcsys_sizing_results_takeoff['power_comp'] * self.n_stacks_parallel
             Pheat_rejected4 = self.n_stacks_parallel*pemfcsys_sizing_results_takeoff['q_all']/1000
-            
+
             # Calculate air mass flow for compressor
             # mair4 = 2.856e-7 * self.lamda_O2 * (ptotal_g - Pbat_takeoff/ self.eta_FC)
             # Calculate fuel cell power system power including compressor
@@ -399,13 +399,13 @@ class FuelCellSizing:
             # Calculate fuel cell power system power including cooling
             # Pheat_rejected4 = ((1 / self.eta_FC) - 1) * (ptotal_g - Pbat_takeoff)/ 1000
             Pcooling_system4_fc = (0.371 * Pheat_rejected4 + 1.33) * self.f_dT * 1000
-            
+
             self.ptotal_h = Pelectricnet4 + self.Pcomp4 + Pcooling_system4_fc
-            
+
             if abs(self.ptotal_h - self.ptotal_g) <= 100:
                 break
-            else: 
-                # Pshaft4 = MTOM_trial * 9.81 * self.P_W_takeoff 
+            else:
+                # Pshaft4 = MTOM_trial * 9.81 * self.P_W_takeoff
                 # MTOM_trial = ptotal_h / (9.81 * self.P_W_takeoff)--
                 # self.P_W_takeoff = self.ptotal_h / (MTOM_trial*9.81)
                 # self.ptotal_g = self.ptotal_h
@@ -421,9 +421,9 @@ class FuelCellSizing:
 
         # #PMAD and electric motor power
         # PPDU = (self.Pfuelcell_climb + self.Pheat_rejected1 + self.Pcooling_system1_fc) * self.eta_Converter + self.Pbat_climb
-        
+
         # Pem = ((self.Pfuelcell_climb + self.Pheat_rejected1 + self.Pcooling_system1_fc) * self.eta_Converter + self.Pbat_climb) * self.eta_PDU * self.eta_Inverter
-        
+
         # self.PFCtotal_climb = self.Pfuelcell_climb
         power_fc_sys_parallel = self.Pfuelcell_climb/self.n_stacks_parallel         # + self.Pheat_rejected1 + self.Pcooling_system1_fc
         comp_bool = True
@@ -436,8 +436,8 @@ class FuelCellSizing:
         print(f"dim_hx: dX = {pemfcsys_sizing_results['dim_hx'][0]:,.3f} m, dY = {pemfcsys_sizing_results['dim_hx'][1]:,.3f} m, dZ = {pemfcsys_sizing_results['dim_hx'][2]:,.3f} m")
         print(f"dim_stack: dX = {pemfcsys_sizing_results['dim_stack'][2]:,.3f} m, dY = {pemfcsys_sizing_results['dim_stack'][0]:,.3f} m, dZ = {pemfcsys_sizing_results['dim_stack'][1]:,.3f} m")
         # print(pemfcsys_sizing_results)
-        
-        
+
+
         # Calculate powertrain component masses
         # self.mFC = (self.Pfuelcell_climb + self.Pcomp1 + self.Pcooling_system1_fc) / self.rhofc
         self.mFC = self.n_stacks_parallel * (pemfcsys_sizing_results['m_stacks'] + pemfcsys_sizing_results['m_humid'] + pemfcsys_sizing_results['m_comp'] + pemfcsys_sizing_results['m_hx'])
@@ -445,12 +445,12 @@ class FuelCellSizing:
         self.mbatt = mbatt_old/(1 - 0.25) # 100은 여분
         # self.mcomp = self.Pcomp1 / self.rhocomp
         self.mcomp = (self.n_stacks_parallel)*pemfcsys_sizing_results['m_comp']
-        
+
         # self.mcoolingsystem = (0.194 * self.Pheat_rejected1 + 1.39) * self.f_dT
         self.mcoolingsystem = (self.n_stacks_parallel)*pemfcsys_sizing_results['m_hx']
         # print('mcoolingsystem: %f' %self.mcoolingsystem)
         print(f"mcoolingsystem: {self.mcoolingsystem:,.0f} kg")
-        
+
 
         # self.Pcomp1 = self.n_stacks_parallel*pemfcsys_sizing_results["power_comp"]
         # self.Pcomp2 = self.n_stacks_parallel*pemfcsys_sizing_results["power_comp"]
@@ -462,10 +462,10 @@ class FuelCellSizing:
 
 
         PPDU = (self.Pfuelcell_climb + self.Pheat_rejected1 + self.Pcooling_system1_fc) * self.eta_Converter + self.Pbat_climb
-        
+
         # Pem = ((self.Pfuelcell_climb + self.Pheat_rejected1 + self.Pcooling_system1_fc) * self.eta_Converter + self.Pbat_climb) * self.eta_PDU * self.eta_Inverter
         Pem = (self.Pfuelcell_climb * self.eta_Converter + self.Pbat_climb) * self.eta_PDU * self.eta_Inverter
-        
+
         self.mem = Pem / self.rhoem
         self.mPMAD = PPDU / self.rhopmad
 
@@ -495,11 +495,11 @@ class FuelCellSizing:
 
         self.mfuel = self.mdot_cruise*(Rcruise + Rdescent)/pemfcsys_sizing_results['v_cr'] + self.mdot_climb*(Rclimb)/self.Vclimb
         print(f"mfuel: {self.mfuel:,.0f} kg")
-        
+
         #Hydrogen tank sizing
 
         # Calculate hydrogen tank volume
-        VH2_tank = self.mfuel * self.Coversize / self.rho_H2 / self.eta_vol  
+        VH2_tank = self.mfuel * self.Coversize / self.rho_H2 / self.eta_vol
         self.Vtankex = VH2_tank
         Ltank = self.Vtankex / (math.pi * ((self.Dfus_imp / (2 * 3.281))**2))
         self.tanklength = Ltank
@@ -511,8 +511,8 @@ class FuelCellSizing:
         MTOM_imp = Conversions.kg_pound(self, MTOM, "pound")
         self.S_wing_imp = MTOM_imp / self.W_S_imp
         self.b_wing_imp = math.sqrt(self.AR_wing * self.S_wing_imp)
-        
-        # print('b_wing: %.2f m' %(self.b_wing_imp/3.281))  
+
+        # print('b_wing: %.2f m' %(self.b_wing_imp/3.281))
         print(f"b_wing: {Conversions.meter_feet(self, self.b_wing_imp, 'meter'):,.2f} m")
 
         #Calculate fuselage sizing
@@ -535,8 +535,8 @@ class FuelCellSizing:
         print(f"Lfus: {Conversions.meter_feet(self, self.Lfus_imp, "meter"):,.2f} m")
         # self.Sfus_imp = math.pi * self.Dfus_imp * self.Lfus_imp + 2 * math.pi * ((self.Dfus_imp/2)**2)
         # self.W_fus_imp = ( 0.052 * ((self.Sfus_imp)**1.086) * ((self.nz * MTOM_imp * 2.205)**0.177) * (self.lHT_imp**(-0.051)) * (self.L_D1**(-0.072)) * (self.q_cruise_imp**0.241))
-        
-        
+
+
         # self.W_wing_imp = (0.036 * (self.S_wing_imp**0.758) *((self.AR_wing/(math.cos(math.radians(self.lc4)))**2))**0.6) * (self.q_cruise_imp**0.006) * (self.lam**0.04) * ((100 * self.t_c / (math.cos(math.radians(self.lc4))))**(-0.3))*((MTOM_imp * 2.205 * self.nz)**(0.49))
         #Wing sizing(lb -> kg) composite correction factor 0.78
         # self.W_wing = self.W_wing_imp * 0.4536 * 0.85 ##################
@@ -553,20 +553,20 @@ class FuelCellSizing:
         ##### SH:~$ FIXED // Wing mass equation receiving METRIC variable(MTOM).
         ##### SH:~$ WeightEst class __init__ magic method accepts SI unit ONLY! ( AUTO CONVERTS TO FT-LBS UNITS )
         ##### SH:~$ cessnamethod / usafmethod / raymermethod / .../ methods accepts IMPERIAL units(FT-LBS) ONLY!
-        WEst = WeightEst(W=MTOM, W_fw=0., S=Conversions.m2_ft2(self, self.S_wing_imp, 'm2'), 
-                         b=Conversions.meter_feet(self, self.b_wing_imp, 'meter'), rho_a_cruise=self.rho_cruise, 
-                         v_cruise=self.Vcruise, t_r_HT=0.09, S_HT=4.5404, S_VT=4.4004, t_r_VT=0.09*1.361, 
-                         L_HT_act=(Conversions.meter_feet(self, self.lHT_imp, "meter")), b_HT=4.765, b_VT=2.907, 
-                         FL=(Conversions.meter_feet(self, self.Lfus_imp, "meter")), 
-                         Wf_mm=(Conversions.meter_feet(self, self.Dfus_imp, "meter")*1000), 
-                         hf_mm=(Conversions.meter_feet(self, self.hfus_imp, "meter")*1000), 
-                         W_press=0, l_n_mm=(Conversions.meter_feet(self, self.Lnose_imp, "meter")*1000), 
-                         Croot=2.430, tc_r=self.t_c, n_ult=self.nz, 
+        WEst = WeightEst(W=MTOM, W_fw=0., S=Conversions.m2_ft2(self, self.S_wing_imp, 'm2'),
+                         b=Conversions.meter_feet(self, self.b_wing_imp, 'meter'), rho_a_cruise=self.rho_cruise,
+                         v_cruise=self.Vcruise, t_r_HT=0.09, S_HT=4.5404, S_VT=4.4004, t_r_VT=0.09*1.361,
+                         L_HT_act=(Conversions.meter_feet(self, self.lHT_imp, "meter")), b_HT=4.765, b_VT=2.907,
+                         FL=(Conversions.meter_feet(self, self.Lfus_imp, "meter")),
+                         Wf_mm=(Conversions.meter_feet(self, self.Dfus_imp, "meter")*1000),
+                         hf_mm=(Conversions.meter_feet(self, self.hfus_imp, "meter")*1000),
+                         W_press=0, l_n_mm=(Conversions.meter_feet(self, self.Lnose_imp, "meter")*1000),
+                         Croot=2.430, tc_r=self.t_c, n_ult=self.nz,
                          Swet_fus=(Conversions.m2_ft2(self, self.Swet_fus_imp, "m2")))
-        [self.W_wing_imp, self.W_wing, self.W_HT_imp, self.W_HT, self.W_VT_imp, self.W_VT, self.W_fus_imp, self.W_fus, 
+        [self.W_wing_imp, self.W_wing, self.W_HT_imp, self.W_HT, self.W_VT_imp, self.W_VT, self.W_fus_imp, self.W_fus,
          self.W_lndgearmain_imp, self.W_lndgearmain, self.W_lndgearnose_imp, self.W_lndgearnose] =\
-              WEst.raymermethod(A=self.AR_wing, theta_c4=(math.radians(self.lc4)), lamda=self.lam, tc=self.t_c, 
-                                theta_c4_HT=(math.radians(2.671)), lamda_HT=0.4, theta_c4_VT=(math.radians(19.53)), 
+              WEst.raymermethod(A=self.AR_wing, theta_c4=(math.radians(self.lc4)), lamda=self.lam, tc=self.t_c,
+                                theta_c4_HT=(math.radians(2.671)), lamda_HT=0.4, theta_c4_VT=(math.radians(19.53)),
                                 lamda_VT=0.4, LD=self.L_D1, Kmp=1.0, W_l=Conversions.kg_pound(self, 8000, 'pound'), N_l=3.0*1.5, L_m=Conversions.meter_inch(self, 0.9, "inch"), N_mw=1, N_mss=1, V_stall=Conversions.km1h_kn(self, 58.32, 'kn'), Knp=1.0, L_n=Conversions.meter_inch(self, 0.90, "inch"), N_nw=1, K_uht=1., F_w=Conversions.meter_feet(self, 1.11, 'ft'), L_t=Conversions.meter_feet(self, 10.74, 'ft'), K_y=Conversions.meter_feet(self, 3.22, 'ft'), A_ht=5, S_e=Conversions.m2_ft2(self, 0.73, 'ft2'), H_t__H_v=1., K_z=Conversions.meter_feet(self, 10.7, 'ft'), t_c=0.09)
         [self.W_motor, self.W_flight_control, self.W_els, self.W_iae, self.W_fur, self.W_hydraulics] =\
         WEst.miscweightest(pow_max=380, N_f=6, N_m=2, S_cs=Conversions.m2_ft2(self, 8.36, "ft2"), Iyaw=4.49*10**6, R_kva=50, L_a=Conversions.meter_feet(self, 20, "ft"), N_gen=1, N_e=4, W_TO=Conversions.kg_pound(self, MTOM, "pound"), N_c=2, W_c=Conversions.kg_pound(self, 10*19, "pound"), S_f=self.Swet_fus_imp*23, N_pil=2)
@@ -579,7 +579,7 @@ class FuelCellSizing:
         print(f"MTOM: {MTOM:,.0f} kg")
 
         return MTOM, Pfuelcell_engine, Pfuelcell_taxing, pemfcsys_sizing_results, power_fc_sys_parallel
-    
+
 class FuelCellSystem:
     def __init__(self):
         # self.sigma_t = 0.03                                         # S/m, Proton conductivity in the catalyst (Data from Table 7)
@@ -602,7 +602,7 @@ class FuelCellSystem:
         # self.jstar_lim = 4*self.F_const * self.D_b * self.c_h / self.l_b
         pass
 
-    
+
     def singlecell(self):
         # self.j_0 = np.linspace(0.06, 1.5, 1000)
         # self.self.beta = np.sqrt( 2* self.j_0/self.jstar ) / ( 1 + np.sqrt(1.12 * self.j_0/self.jstar) * np.exp(2*np.sqrt(2*self.j_0/self.jstar)) ) + (np.pi * self.j_0/self.jstar) / (2 + self.j_0/self.jstar)
@@ -614,7 +614,7 @@ class FuelCellSystem:
         # # plt.show()
         pass
 
-    
+
     def size_system(power_fc_sys, volt_req, h_cr, mach_cr, oversizing, beta, comp_bool, n_stacks_series):
 
 
@@ -715,18 +715,18 @@ class FuelCellSystem:
 
         # Make list of values to return
         results = {
-            'm_sys': m_sys, 
-            'm_stacks': m_stacks, 
-            'm_comp': m_comp, 
-            'm_humid': m_humid, 
-            'm_hx': m_hx, 
-            'eta_fcsys': eta_fcsys, 
-            'mdot_h2': mdot_h2, 
-            'power_comp': power_comp, 
-            'figs': figs, 
-            'dim_stack': dim_stack, 
-            'n_stacks_series': n_stacks_series, 
-            'dim_hx': dim_hx, 
+            'm_sys': m_sys,
+            'm_stacks': m_stacks,
+            'm_comp': m_comp,
+            'm_humid': m_humid,
+            'm_hx': m_hx,
+            'eta_fcsys': eta_fcsys,
+            'mdot_h2': mdot_h2,
+            'power_comp': power_comp,
+            'figs': figs,
+            'dim_stack': dim_stack,
+            'n_stacks_series': n_stacks_series,
+            'dim_hx': dim_hx,
             'res_stack': res_stack,
             'q_all': q_all,
             'v_cr': v_cr,
@@ -734,7 +734,7 @@ class FuelCellSystem:
             }
 
         return results
-    
+
 
 
     def othersys(self):
@@ -766,8 +766,8 @@ if __name__ == "__main__":
         print(f"======================================================")
         print(f"======================= ITER {iter2} =======================")
         [ptotal_cruise, _] = FCS.cal_Ptotal_cruise(mtom_a, ptotal_cruise)
-        [ptotal_cruise_charger, Pcooling_system3_fc, _] = FCS.cal_Ptotal_cruise_charger(mtom_a, ptotal_cruise_charger) 
-        [ptotal_takeoff, _] = FCS.cal_Ptotal_takeoff(mtom_a, ptotal_takeoff) 
+        [ptotal_cruise_charger, Pcooling_system3_fc, _] = FCS.cal_Ptotal_cruise_charger(mtom_a, ptotal_cruise_charger)
+        [ptotal_takeoff, _] = FCS.cal_Ptotal_takeoff(mtom_a, ptotal_takeoff)
         [Ptotal_climb, _] = FCS.cal_Ptotal_climb(mtom_a, Ptotal_climb)
         [MTOM_t, Pfuelcell_engine, Pfuelcell_taxing, pemfcsys_sizing_results, power_fc_sys_parallel] = FCS.cal_MTOM(mtom_a)
         # print("ptotal_climb: %f mtom_a: %f" %(FCS.Ptotal_climb, MTOM))
@@ -801,7 +801,7 @@ if __name__ == "__main__":
 
             # print(f"Mfftotal: {FCS.Mfftotal:,.4f} ")                # Not Calculated
 
-            
+
 
             # print(f"\n=======================")
             print("\nPer Nacelle")
@@ -837,7 +837,7 @@ if __name__ == "__main__":
             print(f"mdot_H2: {FCS.mdot_cruise*1000:.1f} g/s")
             print(f"-----------------------")
             print(f"MTOM: {MTOM_t:,.0f} kg")
-            
+
             print(f"\nVtankex: {FCS.Vtankex:,.1f} m^3")
 
             # print(f"\nPfuel_ready: {pfc_ready/1000:,.0f} kW, Pfuel_taxing: {pfc_taxing/1000:,.0f} kW, Pfuel_climb: {pfc_climb/1000:,.0f} kW, Pfuel_cruise: {pfc_cruise2/1000:,.0f} kW, Pfuel_cruise_charger: {pfc_cruise1/1000:,.0f} kW, Pbat_climb: {pbat_climb/1000:,.0f} kW, Pbat_charge: {pbat_charge/1000:,.0f} kW")
@@ -867,7 +867,7 @@ if __name__ == "__main__":
     ####################
 
     figs = pemfcsys_sizing_results['figs']
-    # figs[-1].show()
+    figs[-1].show()
     # figs[-1].write_image(f"../figs/pemfc_fig.png")
     save_path = Path(__file__).resolve().parent.parent / "figs" / "pemfc_fig.png"
     figs[-1].write_image(str(save_path))
@@ -875,7 +875,7 @@ if __name__ == "__main__":
     #Mission profile plot code
     # print('Pfuel_ready: %.2f kW Pfuel_taxing: %.2f kW Pfuel_climb: %.2f kW Pfuel_cruise: %.2f kW Pfuel_cruise_charger: %.2f kW Pbat_climb: %.2f kW Pbat_charge: %.2f kW' %(pfc_ready/1000, pfc_taxing/1000, pfc_climb/1000 , pfc_cruise2/1000, pfc_cruise1/1000 , pbat_climb/1000,  pbat_charge/1000))
     print(f"\nPfuel_ready: {pfc_ready/1000:,.0f} kW, Pfuel_taxing: {pfc_taxing/1000:,.0f} kW, Pfuel_climb: {pfc_climb/1000:,.0f} kW, Pfuel_cruise: {pfc_cruise2/1000:,.0f} kW, Pfuel_cruise_charger: {pfc_cruise1/1000:,.0f} kW, Pbat_climb: {pbat_climb/1000:,.0f} kW, Pbat_charge: {pbat_charge/1000:,.0f} kW")
-    
+
 
     Power_fc = [pfc_ready, pfc_taxing, pfc_takeoff, pfc_climb, pfc_climb, pfc_cruise1, pfc_cruise1, pfc_cruise2, pfc_cruise2, pfc_taxing, pfc_climb, pfc_climb, pfc_cruise2, pfc_cruise2, pfc_cruise2, pfc_cruise2, pfc_taxing, pfc_taxing, pfc_taxing, pfc_ready]
     Power_bat = [0, 0, pbat_takeoff, pbat_climb, pbat_climb, pbat_charge, pbat_charge, 0, 0, 0, pbat_climb, pbat_climb, 0, 0, 0, 0, 0, 0, 0, 0]
