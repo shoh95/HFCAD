@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import configparser
+import shutil
 
 import time
 import math
@@ -1586,6 +1587,13 @@ def _print_summary(phases: Dict[str, PhasePowerResult], mass: MassBreakdown, cfg
     print("========================== END ==============================")
 
 
+def _output_subdir_from_input(input_path: Path) -> str:
+    stem = input_path.stem
+    if stem.startswith("input_"):
+        return stem[len("input_") :]
+    return stem
+
+
 def main(argv: Optional[List[str]] = None) -> None:
     logging.basicConfig(level=logging.INFO, format="%(message)s")
 
@@ -1637,8 +1645,12 @@ def main(argv: Optional[List[str]] = None) -> None:
 
     _print_summary(phases, mass, cfg)
 
-    out_dir = Path(args.outdir).expanduser()
+    out_root = Path(args.outdir).expanduser()
+    out_dir = out_root / _output_subdir_from_input(input_path)
     out_dir.mkdir(parents=True, exist_ok=True)
+    input_copy_path = out_dir / input_path.name
+    if input_copy_path.resolve() != input_path.resolve():
+        shutil.copy2(input_path, input_copy_path)
 
     writer = OutputWriter(cfg)
 
