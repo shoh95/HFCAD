@@ -1152,16 +1152,21 @@ class PhasePowerSolver:
             split = self._powertrain.split_shaft_power(p_shaft, psi)
             p_bus_required = split.p_bus_required_w
 
-            # Allocate FC system net output used for per-nacelle sizing.
-            # Legacy behaviour:
-            #   - when battery discharges (p_battery > 0), subtract it from the total to get FC share
-            #   - when battery charges (p_battery < 0), do not subtract (charging already appears as +abs(p_battery))
-            p_fc_sys_total = p_total - max(split.p_battery_w, 0.0)
+            # Fuel-cell net electrical output used for per-nacelle sizing.
+            #
+            # IMPORTANT:
+            # - size_nacelle(power_fc_sys_w=...) expects the **net** FC electrical output that goes to the propulsive bus
+            #   (it accounts for compressor parasitics internally via: power_req_new = power_fc_sys_w + power_comp).
+            # - Therefore, do NOT base this on p_total (which already includes compressor/cooling), or auxiliaries
+            #   get double-counted and p_total can inflate substantially (often ~2× in climb).
+            #
+            # Battery convention: p_battery_w > 0 discharge, p_battery_w < 0 charge.
+            # - Discharge: FC must provide only its share (subtract battery contribution).
+            # - Charge: FC must provide propulsion plus charging demand.
+            p_fc_sys_total = split.p_bus_required_w - max(split.p_battery_w, 0.0)
 
             # Guardrail: ensure sizing power stays positive.
-            if p_fc_sys_total <= 0.0:
-                # Prefer a consistent fallback over the legacy 'set to ptotal' (which mixes per-system/per-nacelle units).
-                p_fc_sys_total = max(split.p_fuelcell_w, 1.0)
+            p_fc_sys_total = max(p_fc_sys_total, 1.0)
 
             p_fc_sys_per_nacelle = p_fc_sys_total / self._cfg.fuel_cell_arch.n_stacks_parallel
 
@@ -1235,7 +1240,10 @@ class MassEstimator:
         # -----------------
         # Fuel cell sizing at climb (design) power
         # -----------------
-        power_fc_sys_per_nacelle = climb.p_fuelcell_w / cfg.fuel_cell_arch.n_stacks_parallel
+        # Fuel-cell net output used for sizing (consistent with PhasePowerSolver).
+        power_fc_sys_total = climb.p_bus_required_w - max(climb.p_battery_w, 0.0)
+        power_fc_sys_total = max(power_fc_sys_total, 1.0)
+        power_fc_sys_per_nacelle = power_fc_sys_total / cfg.fuel_cell_arch.n_stacks_parallel
 
         nacelle_design = FuelCellSystemModel(cfg.fuel_cell_arch).size_nacelle(
             power_fc_sys_w=power_fc_sys_per_nacelle,
