@@ -93,6 +93,11 @@ class FuelCellOperation:
     """Fuel cell operating assumptions."""
 
     oversizing: float = 0.30
+    # Cruise compressor beta policy:
+    # - True: beta = 1.2 / rho_cruise for cruise and cruise_charger
+    # - False: beta = 1.05
+    # - numeric: beta = value for cruise only (cruise_charger remains 1.05)
+    beta: str = "False"
 
 
 @dataclass(frozen=True)
@@ -422,6 +427,57 @@ def _parse_bool(value: str) -> bool:
     if v in {"0", "false", "no", "n", "off"}:
         return False
     raise ValueError(f"Invalid boolean value: {value!r}")
+
+
+def _resolve_cruise_betas(
+    beta_setting: object,
+    *,
+    cruise_density_kg_per_m3: float,
+) -> Tuple[float, float]:
+    """Resolve (beta_cruise, beta_cruise_charger) from user setting."""
+
+    beta_default = 1.05
+
+    if cruise_density_kg_per_m3 <= 0.0:
+        raise ValueError(
+            f"Cruise density must be positive to compute beta from density, got {cruise_density_kg_per_m3}."
+        )
+
+    if isinstance(beta_setting, bool):
+        if beta_setting:
+            beta_dyn = 1.2 / float(cruise_density_kg_per_m3)
+            return float(beta_dyn), float(beta_dyn)
+        return beta_default, beta_default
+
+    if isinstance(beta_setting, (int, float)):
+        beta_num = float(beta_setting)
+        if beta_num <= 0.0:
+            raise ValueError(f"fuel_cell_op.beta must be > 0 when numeric, got {beta_num}.")
+        return beta_num, beta_default
+
+    token = str(beta_setting).strip()
+    if token == "":
+        return beta_default, beta_default
+
+    low = token.lower()
+    if low in {"1", "true", "yes", "y", "on"}:
+        beta_dyn = 1.2 / float(cruise_density_kg_per_m3)
+        return float(beta_dyn), float(beta_dyn)
+    if low in {"0", "false", "no", "n", "off"}:
+        return beta_default, beta_default
+
+    try:
+        beta_num = float(token)
+    except ValueError as e:
+        raise ValueError(
+            "Invalid fuel_cell_op.beta value. Use True/False or a numeric value (for cruise only)."
+        ) from e
+
+    if beta_num <= 0.0:
+        raise ValueError(f"fuel_cell_op.beta must be > 0 when numeric, got {beta_num}.")
+
+    # Numeric beta is applied only to cruise; cruise_charger remains fixed at default.
+    return beta_num, beta_default
 
 
 def _split_list(value: str) -> List[str]:
@@ -1219,6 +1275,10 @@ class MassEstimator:
         self._c_cr_mps = float(atm_cr.speed_of_sound[0])
         self._v_cr_mps = float(cfg.flight.mach_cr * self._c_cr_mps)
         self._rho_cr = float(atm_cr.density[0])
+        self._beta_cruise, _ = _resolve_cruise_betas(
+            cfg.fuel_cell_op.beta,
+            cruise_density_kg_per_m3=self._rho_cr,
+        )
 
         # Wing loading (mass-based) in kg/m^2
         self._w_s_kg_per_m2 = float(cfg.wing.wing_loading_kg_per_m2)
@@ -1248,7 +1308,7 @@ class MassEstimator:
         nacelle_design = FuelCellSystemModel(cfg.fuel_cell_arch).size_nacelle(
             power_fc_sys_w=power_fc_sys_per_nacelle,
             flight_point=FlightPoint(cfg.flight.h_cr_m, cfg.flight.mach_cr),
-            beta=1.05,
+            beta=self._beta_cruise,
             oversizing=cfg.fuel_cell_op.oversizing,
             comp_bool=True,
             make_fig=False,
@@ -1516,6 +1576,11 @@ class HybridFuelCellAircraftDesign:
 
     def __init__(self, cfg: DesignConfig):
         self._cfg = cfg
+        self._rho_cr = float(Atmosphere(cfg.flight.h_cr_m).density[0])
+        self._beta_cruise, self._beta_cruise_charger = _resolve_cruise_betas(
+            cfg.fuel_cell_op.beta,
+            cruise_density_kg_per_m3=self._rho_cr,
+        )
 
         self._powertrain = HybridPowertrain(cfg.eff)
         self._cooling = CoolingSystem(
@@ -1566,7 +1631,7 @@ class HybridFuelCellAircraftDesign:
                 p_w_kw_per_kg=cfg.p_w.p_w_cruise_kw_per_kg,
                 flight_point=FlightPoint(cfg.flight.h_cr_m, cfg.flight.mach_cr),
                 psi=0.0,
-                beta=1.05,
+                beta=self._beta_cruise,
                 initial_total_power_w=ptotal_guess["cruise"],
                 oversizing=cfg.fuel_cell_op.oversizing,
             )
@@ -1579,7 +1644,7 @@ class HybridFuelCellAircraftDesign:
                 p_w_kw_per_kg=cfg.p_w.p_w_cruise_kw_per_kg,
                 flight_point=FlightPoint(cfg.flight.h_cr_m, cfg.flight.mach_cr),
                 psi=cfg.hybrid.psi_cruise_charger,
-                beta=1.05,
+                beta=self._beta_cruise_charger,
                 initial_total_power_w=ptotal_guess["cruise_charger"],
                 oversizing=cfg.fuel_cell_op.oversizing,
             )
@@ -2027,6 +2092,11 @@ class CoupledConstraintSizingRunner:
 class OutputWriter:
     def __init__(self, cfg: DesignConfig):
         self._cfg = cfg
+        rho_cr = float(Atmosphere(cfg.flight.h_cr_m).density[0])
+        self._beta_cruise, _ = _resolve_cruise_betas(
+            cfg.fuel_cell_op.beta,
+            cruise_density_kg_per_m3=rho_cr,
+        )
 
     def write_pemfc_figure(
         self,
@@ -2042,7 +2112,7 @@ class OutputWriter:
             res = fc.size_nacelle(
                 power_fc_sys_w=nacelle_power_w,
                 flight_point=FlightPoint(self._cfg.flight.h_cr_m, self._cfg.flight.mach_cr),
-                beta=1.05,
+                beta=self._beta_cruise,
                 oversizing=self._cfg.fuel_cell_op.oversizing,
                 comp_bool=True,
                 make_fig=True,
@@ -2391,4 +2461,3 @@ if __name__ == "__main__":
     print("\n\n=============================================================")
     print(f'Execution time: {elapsed_time:.1f} seconds')
     print("=============================================================")
-
