@@ -1315,13 +1315,25 @@ class MassEstimator:
             verbose=True,
         )
 
-        # Mass per nacelle (legacy: stack + humidifier + compressor + HX)
-        m_fc_system = cfg.fuel_cell_arch.n_stacks_parallel * (
+        # Mass per nacelle: use cruise-governing compressor mass for MTOM summation.
+        m_comp_cruise_per_nacelle = float(cruise.nacelle.m_comp_kg)
+        m_comp_climb_per_nacelle = float(climb.nacelle.m_comp_kg)
+        m_comp_max_per_nacelle = max(m_comp_cruise_per_nacelle, m_comp_climb_per_nacelle)
+        if m_comp_max_per_nacelle > m_comp_cruise_per_nacelle:
+            logger.warning(
+                "Compressor mass max is not at cruise (cruise=%.3f kg, climb=%.3f kg). "
+                "Using cruise compressor mass in MTOM summation.",
+                m_comp_cruise_per_nacelle,
+                m_comp_climb_per_nacelle,
+            )
+
+        m_fc_system_per_nacelle = float(
             nacelle_design.m_stacks_kg
             + nacelle_design.m_humid_kg
-            + nacelle_design.m_comp_kg
+            + m_comp_cruise_per_nacelle
             + nacelle_design.m_hx_kg
         )
+        m_fc_system = float(cfg.fuel_cell_arch.n_stacks_parallel * m_fc_system_per_nacelle)
 
         # -----------------
         # Battery mass (legacy)
@@ -1532,7 +1544,7 @@ class MassEstimator:
         p_fuelcell_engine_w = float(p_total_climb_w * 0.05)
         p_fuelcell_taxing_w = float(p_total_climb_w * 0.10)
 
-        nacelle_pd_kw_per_kg = float((power_fc_sys_per_nacelle / 1000.0) / nacelle_design.m_sys_kg)
+        nacelle_pd_kw_per_kg = float((power_fc_sys_per_nacelle / 1000.0) / m_fc_system_per_nacelle)
 
         return MassBreakdown(
             mtom_kg=mtom,
