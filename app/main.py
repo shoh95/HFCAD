@@ -1570,6 +1570,8 @@ def _converged_summary_text(
 
     pnet = phases["climb"].p_total_w * cfg.eff.eta_pdu * cfg.eff.eta_em
     nac = phases["climb"].nacelle
+    p_to_w_converged_w_per_kg = phases["climb"].p_total_w / mass.mtom_kg
+    wing_loading_tmtom_per_m2 = (mass.mtom_kg / 1000.0) / mass.wing_area_m2
 
     lines = [
         "=============================================================",
@@ -1624,6 +1626,8 @@ def _converged_summary_text(
         f"mdot_H2(cruise): {phases['cruise'].mdot_h2_kgps*1000:,.1f} g/s",
         "-----------------------",
         f"MTOM: {mass.mtom_kg:,.0f} kg",
+        f"Power-to-weight (converged): {p_to_w_converged_w_per_kg:,.2f} W/kg",
+        f"Wing loading (tMTOM/S_wing): {wing_loading_tmtom_per_m2:,.4f} t/m^2",
         "",
         f"Vtankex: {mass.tank_volume_m3:,.1f} m^3",
         "========================== END ==============================",
