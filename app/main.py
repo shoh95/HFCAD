@@ -4,10 +4,6 @@ This module is an object-oriented refactor of the legacy script:
   - configuration is explicit (dataclasses)
   - responsibilities are separated (powertrain, FC system, cooling, mass estimation, solver)
   - the numerical approach and default constants are intentionally kept close to the legacy behaviour
-
-Note:
-- This is a refactor, not a physics/model correctness overhaul.
-- Some legacy formulas contain unit ambiguities; these are preserved by default for backward compatibility.
 """
 
 from __future__ import annotations
@@ -16,6 +12,7 @@ import argparse
 import configparser
 import shutil
 import threading
+import sys
 
 import time
 import math
@@ -259,6 +256,124 @@ class SolverConfig:
     max_inner_iter: int = 50
 
 
+
+@dataclass(frozen=True)
+class ConstraintSizingConfig:
+    """ADRpy-based initial sizing / constraint coupling configuration.
+
+    When enabled, HFCAD can call ADRpy's constraint analysis to derive:
+      - wing loading (W/S) [Pa] -> mapped to HFCAD's wing_loading_kg_per_m2
+      - power-to-weight ratios (P/W) [kW/kg] for takeoff, climb, cruise
+
+    Two selection modes are supported:
+      - selection = 'min_combined_pw': choose W/S that minimises ADRpy's combined P/W requirement
+      - selection = 'min_mtom': scan W/S and run HFCAD convergence to minimise MTOM
+    """
+
+    enable: bool = False
+
+    # 'min_combined_pw' (fast) or 'min_mtom' (coupled, expensive).
+    selection: str = "min_combined_pw"
+
+    # Wing-loading scan bounds in Pa (N/m^2). HFCAD uses kg/m^2 internally.
+    ws_min_pa: float = 1500.0
+    ws_max_pa: float = 3000.0
+    ws_step_pa: float = 25.0
+
+    # Optional refinement passes for selection='min_mtom' (0 disables refinement).
+    ws_refine_passes: int = 0
+    ws_refine_span_fraction: float = 0.20  # +/- span around current best (fraction of full range)
+
+    # Multiplicative margin applied to all constraint-derived P/W outputs.
+    pw_margin_fraction: float = 0.0
+
+    # ADRpy propulsion identifier (affects altitude correction models). For H2 FC/electric, use 'electric'.
+    propulsion_type: str = "electric"
+
+    # Map which ADRpy constraint curve is used to populate HFCAD's phase P/W inputs.
+    # Valid keys from ADRpy.powerrequired(): 'take-off', 'climb', 'cruise', 'turn', 'servceil', 'combined'
+    takeoff_constraint: str = "take-off"
+    climb_constraint: str = "climb"
+    cruise_constraint: str = "cruise"
+
+    # If True, force all three phase P/W values (takeoff/climb/cruise) to use the same curve (combined).
+    use_combined_for_phases: bool = False
+
+    # Scan verbosity control for selection='min_mtom'
+    scan_quiet: bool = True
+
+    # Optional artifact exports (CSV) written to the output directory.
+    write_trade_csv: bool = True
+
+
+@dataclass(frozen=True)
+class ConstraintBriefConfig:
+    """Design brief inputs for ADRpy constraint analysis.
+
+    Defaults are set to match the uploaded notebook:
+      'Constraint analysis - RIMP9 design case.ipynb'
+    """
+
+    # Take-off requirements
+    rwyelevation_m: float = 0.0
+    groundrun_m: float = 800.0
+
+    # Turn requirements
+    stloadfactor: float = 1.5
+    turnalt_m: float = 3000.0
+    turnspeed_ktas: float = 160.0
+
+    # Climb requirements
+    climbalt_m: float = 0.0
+    climbspeed_kias: float = 170.0
+    climbrate_fpm: float = 1200.0
+
+    # Cruise requirements
+    cruisealt_m: float = 3000.0
+    cruisespeed_ktas: float = 220.0
+    cruisethrustfact: float = 0.75
+
+    # Service ceiling requirements
+    servceil_m: float = 5000.0
+    secclimbspd_kias: float = 120.0
+
+    # Required clean stall speed
+    vstallclean_kcas: float = 110.0
+
+
+@dataclass(frozen=True)
+class ConstraintPerformanceConfig:
+    """Aerodynamic and propulsive assumptions for ADRpy constraint analysis."""
+
+    # Take-off / low-speed aerodynamic coefficients
+    cdto: float = 0.0414
+    clto: float = 1.3
+    clmax_to: float = 1.75
+
+    # Clean (cruise/turn) aerodynamics
+    clmax_clean: float = 1.45
+    cdmin_clean: float = 0.0254
+
+    # Rolling friction coefficient
+    mu_r: float = 0.02
+
+    # Propeller efficiency by phase (ADRpy uses phase-specific values)
+    etaprop_takeoff: float = 0.70
+    etaprop_climb: float = 0.80
+    etaprop_cruise: float = 0.85
+    etaprop_turn: float = 0.85
+    etaprop_servceil: float = 0.80
+
+
+@dataclass(frozen=True)
+class ConstraintGeometryConfig:
+    """Geometry inputs required by ADRpy's drag build-up / induced drag models."""
+
+    # Leading-edge and mid-thickness sweep angles (deg). If unknown, set both ~0-5 deg.
+    sweep_le_deg: float = 2.0
+    sweep_mt_deg: float = 0.0
+
+
 @dataclass(frozen=True)
 class DesignConfig:
     """Top-level configuration for the design run."""
@@ -283,6 +398,12 @@ class DesignConfig:
     weights: WeightsConfig = WeightsConfig()
 
     solver: SolverConfig = SolverConfig()
+
+    # ADRpy-based constraint analysis coupling (optional)
+    constraint_sizing: ConstraintSizingConfig = ConstraintSizingConfig()
+    constraint_brief: ConstraintBriefConfig = ConstraintBriefConfig()
+    constraint_performance: ConstraintPerformanceConfig = ConstraintPerformanceConfig()
+    constraint_geometry: ConstraintGeometryConfig = ConstraintGeometryConfig()
 
     # Default initial guesses (legacy)
     initial_mtom_kg: float = 8000.0
@@ -491,7 +612,9 @@ def load_design_config(input_path: Path) -> DesignConfig:
 
     Sections map to the nested dataclasses in DesignConfig:
       mission, flight, fuel_cell_arch, fuel_cell_op, hybrid, eff, densities, p_w,
-      cooling, hydrogen, wing, fuselage, weights, solver, design
+      cooling, hydrogen, wing, fuselage, weights, solver,
+      constraint_sizing, constraint_brief, constraint_performance, constraint_geometry,
+      design
     """
 
     cfg_default = DesignConfig()
@@ -543,6 +666,19 @@ def load_design_config(input_path: Path) -> DesignConfig:
 
     solver = _update_dataclass_from_section(cfg_default.solver, "solver", section("solver"))
 
+    constraint_sizing = _update_dataclass_from_section(
+        cfg_default.constraint_sizing, "constraint_sizing", section("constraint_sizing")
+    )
+    constraint_brief = _update_dataclass_from_section(
+        cfg_default.constraint_brief, "constraint_brief", section("constraint_brief")
+    )
+    constraint_performance = _update_dataclass_from_section(
+        cfg_default.constraint_performance, "constraint_performance", section("constraint_performance")
+    )
+    constraint_geometry = _update_dataclass_from_section(
+        cfg_default.constraint_geometry, "constraint_geometry", section("constraint_geometry")
+    )
+
     # Top-level fields
     design_section = section("design")
     if design_section is not None:
@@ -577,6 +713,10 @@ def load_design_config(input_path: Path) -> DesignConfig:
         fuselage=fuselage,
         weights=weights,
         solver=solver,
+        constraint_sizing=constraint_sizing,
+        constraint_brief=constraint_brief,
+        constraint_performance=constraint_performance,
+        constraint_geometry=constraint_geometry,
         initial_mtom_kg=float(initial_mtom_kg),
         initial_total_power_guess_w=float(initial_total_power_guess_w),
     )
@@ -624,6 +764,11 @@ def write_input_template(path: Path, cfg: Optional[DesignConfig] = None) -> None
     section("fuselage", cfg.fuselage)
     section("weights", cfg.weights)
     section("solver", cfg.solver)
+
+    section("constraint_sizing", cfg.constraint_sizing)
+    section("constraint_brief", cfg.constraint_brief)
+    section("constraint_performance", cfg.constraint_performance)
+    section("constraint_geometry", cfg.constraint_geometry)
 
     lines.append("[design]")
     lines.append(f"initial_mtom_kg = {fmt(cfg.initial_mtom_kg)}")
@@ -1379,17 +1524,25 @@ class HybridFuelCellAircraftDesign:
         )
         self._mass_estimator = MassEstimator(cfg=cfg)
 
-    def run(self) -> Tuple[Dict[str, PhasePowerResult], MassBreakdown]:
+    def run(
+        self,
+        *,
+        initial_mtom_kg: Optional[float] = None,
+        initial_total_power_guess_w: Optional[float] = None,
+    ) -> Tuple[Dict[str, PhasePowerResult], MassBreakdown]:
         cfg = self._cfg
 
         # Initial conditions
-        mtom = float(cfg.initial_mtom_kg)
+        mtom = float(cfg.initial_mtom_kg if initial_mtom_kg is None else initial_mtom_kg)
 
+        p0 = float(
+            cfg.initial_total_power_guess_w if initial_total_power_guess_w is None else initial_total_power_guess_w
+        )
         ptotal_guess = {
-            "cruise": float(cfg.initial_total_power_guess_w),
-            "cruise_charger": float(cfg.initial_total_power_guess_w),
-            "takeoff": float(cfg.initial_total_power_guess_w),
-            "climb": float(cfg.initial_total_power_guess_w),
+            "cruise": p0,
+            "cruise_charger": p0,
+            "takeoff": p0,
+            "climb": p0,
         }
 
         phases: Dict[str, PhasePowerResult] = {}
@@ -1466,6 +1619,396 @@ class HybridFuelCellAircraftDesign:
             mtom = float(mass.mtom_kg)
 
         raise RuntimeError(f"MTOM did not converge within {cfg.solver.max_outer_iter} outer iterations")
+
+
+
+# ============================
+# ADRpy coupling (constraint analysis)
+# ============================
+
+_G0_MPS2 = 9.80665
+
+
+@dataclass(frozen=True)
+class ADRpyDesignPoint:
+    """Selected (W/S, P/W) point to be fed into the hybrid sizing loop."""
+
+    wing_loading_pa: float
+    wing_loading_kg_per_m2: float
+
+    p_w_takeoff_kw_per_kg: float
+    p_w_climb_kw_per_kg: float
+    p_w_cruise_kw_per_kg: float
+
+
+class ADRpyConstraintAnalyzer:
+    """Thin adapter around ADRpy constraintanalysis for HFCAD.
+
+    Key design decision:
+      - ADRpy is used as the *performance feasibility* model (P/W requirement vs W/S).
+      - HFCAD is used as the *mass closure* model (MTOM vs wing area and installed power).
+    """
+
+    def __init__(self, cfg: DesignConfig):
+        self._cfg = cfg
+
+        try:
+            from ADRpy import unitconversions as adr_co  # type: ignore
+            from ADRpy import constraintanalysis as adr_ca  # type: ignore
+            from ADRpy import atmospheres as adr_at  # type: ignore
+        except Exception as e:  # pragma: no cover
+            raise ImportError(
+                "ADRpy is required for constraint-based sizing. "
+                "Vendor the ADRpy package into app/ADRpy or install it into your environment."
+            ) from e
+
+        self._co = adr_co
+        self._ca = adr_ca
+        self._atm = adr_at.Atmosphere()
+
+    def _build_concept(self, *, mtom_kg: float):
+        cfg = self._cfg
+        b = cfg.constraint_brief
+        p = cfg.constraint_performance
+        g = cfg.constraint_geometry
+
+        designbrief = {
+            "rwyelevation_m": float(b.rwyelevation_m),
+            "groundrun_m": float(b.groundrun_m),
+            "stloadfactor": float(b.stloadfactor),
+            "turnalt_m": float(b.turnalt_m),
+            "turnspeed_ktas": float(b.turnspeed_ktas),
+            "climbalt_m": float(b.climbalt_m),
+            "climbspeed_kias": float(b.climbspeed_kias),
+            "climbrate_fpm": float(b.climbrate_fpm),
+            "cruisealt_m": float(b.cruisealt_m),
+            "cruisespeed_ktas": float(b.cruisespeed_ktas),
+            "cruisethrustfact": float(b.cruisethrustfact),
+            "servceil_m": float(b.servceil_m),
+            "secclimbspd_kias": float(b.secclimbspd_kias),
+            "vstallclean_kcas": float(b.vstallclean_kcas),
+        }
+
+        designdefinition = {
+            "aspectratio": float(cfg.wing.aspect_ratio),
+            "sweep_le_deg": float(g.sweep_le_deg),
+            "sweep_mt_deg": float(g.sweep_mt_deg),
+            "weightfractions": {"turn": 1.0, "climb": 1.0, "cruise": 1.0, "servceil": 1.0},
+            "weight_n": float(self._co.kg2n(float(mtom_kg))),
+        }
+
+        designperformance = {
+            "CDTO": float(p.cdto),
+            "CLTO": float(p.clto),
+            "CLmaxTO": float(p.clmax_to),
+            "CLmaxclean": float(p.clmax_clean),
+            "mu_R": float(p.mu_r),
+            "CDminclean": float(p.cdmin_clean),
+            "etaprop": {
+                "take-off": float(p.etaprop_takeoff),
+                "climb": float(p.etaprop_climb),
+                "cruise": float(p.etaprop_cruise),
+                "turn": float(p.etaprop_turn),
+                "servceil": float(p.etaprop_servceil),
+            },
+        }
+
+        propulsion = str(cfg.constraint_sizing.propulsion_type)
+        return self._ca.AircraftConcept(designbrief, designdefinition, designperformance, self._atm, propulsion)
+
+    def power_to_weight_curves_kw_per_kg(
+        self,
+        *,
+        wingloading_pa: np.ndarray,
+        mtom_kg: float,
+    ) -> Tuple[Dict[str, np.ndarray], Optional[float]]:
+        """Return ADRpy P/W requirement curves in kW/kg for each constraint and the clean-stall W/S limit."""
+
+        concept = self._build_concept(mtom_kg=float(mtom_kg))
+
+        preq_hp = concept.powerrequired(wingloading_pa, tow_kg=float(mtom_kg), feasibleonly=True, map2sl=True)
+
+        curves: Dict[str, np.ndarray] = {}
+        for k, v in preq_hp.items():
+            # Convert hp -> kW -> kW/kg
+            curves[k] = np.asarray(self._co.hp2kw(v), dtype=float) / float(mtom_kg)
+
+        # Clean stall maximum W/S (Pa). Not always defined if CLmaxclean missing.
+        try:
+            wsmax_cleanstall_pa = float(concept.wsmaxcleanstall_pa())
+        except Exception:
+            wsmax_cleanstall_pa = None
+
+        return curves, wsmax_cleanstall_pa
+
+    @staticmethod
+    def _select_index_min(curve: np.ndarray, valid_mask: np.ndarray) -> int:
+        idxs = np.where(valid_mask)[0]
+        if idxs.size == 0:
+            raise RuntimeError("No feasible design points in the wing-loading grid (check inputs / stall limits).")
+        sub = curve[idxs]
+        # Use nanargmin on the masked subset (should be finite, but be defensive)
+        j = int(np.nanargmin(sub))
+        return int(idxs[j])
+
+    def select_design_point_min_combined_pw(
+        self,
+        *,
+        wingloading_pa: np.ndarray,
+        mtom_kg: float,
+    ) -> Tuple[ADRpyDesignPoint, Dict[str, np.ndarray], Optional[float]]:
+        """Choose W/S that minimises ADRpy combined P/W (kW/kg)."""
+
+        curves, wsmax_cleanstall_pa = self.power_to_weight_curves_kw_per_kg(
+            wingloading_pa=wingloading_pa, mtom_kg=float(mtom_kg)
+        )
+
+        combined = np.asarray(curves.get("combined"), dtype=float)
+        valid = np.isfinite(combined)
+
+        if wsmax_cleanstall_pa is not None:
+            valid &= wingloading_pa <= float(wsmax_cleanstall_pa)
+
+        i_opt = self._select_index_min(combined, valid_mask=valid)
+
+        dp = self._design_point_from_curves(wingloading_pa=wingloading_pa, curves=curves, idx=i_opt)
+        return dp, curves, wsmax_cleanstall_pa
+
+    def _design_point_from_curves(
+        self,
+        *,
+        wingloading_pa: np.ndarray,
+        curves: Dict[str, np.ndarray],
+        idx: int,
+    ) -> ADRpyDesignPoint:
+        """Map ADRpy curves -> HFCAD inputs at a specific wingloading index."""
+
+        cs = self._cfg.constraint_sizing
+
+        def _get(curve_key: str) -> float:
+            if curve_key not in curves:
+                raise KeyError(f"ADRpy curve '{curve_key}' not found. Available: {sorted(curves.keys())}")
+            return float(np.asarray(curves[curve_key], dtype=float)[idx])
+
+        if cs.use_combined_for_phases:
+            p_takeoff = _get("combined")
+            p_climb = _get("combined")
+            p_cruise = _get("combined")
+        else:
+            p_takeoff = _get(str(cs.takeoff_constraint))
+            p_climb = _get(str(cs.climb_constraint))
+            p_cruise = _get(str(cs.cruise_constraint))
+
+        margin = 1.0 + float(cs.pw_margin_fraction)
+        p_takeoff *= margin
+        p_climb *= margin
+        p_cruise *= margin
+
+        ws_pa = float(wingloading_pa[idx])
+        ws_kgm2 = ws_pa / _G0_MPS2
+
+        return ADRpyDesignPoint(
+            wing_loading_pa=ws_pa,
+            wing_loading_kg_per_m2=ws_kgm2,
+            p_w_takeoff_kw_per_kg=p_takeoff,
+            p_w_climb_kw_per_kg=p_climb,
+            p_w_cruise_kw_per_kg=p_cruise,
+        )
+
+
+class CoupledConstraintSizingRunner:
+    """Runs constraint-based sizing and couples it to the hybrid mass-closure loop."""
+
+    def __init__(self, cfg: DesignConfig):
+        self._cfg = cfg
+        self._adr = ADRpyConstraintAnalyzer(cfg)
+
+    def _wingloading_grid_pa(self) -> np.ndarray:
+        cs = self._cfg.constraint_sizing
+        if cs.ws_step_pa <= 0:
+            raise ValueError("constraint_sizing.ws_step_pa must be > 0")
+        if cs.ws_max_pa <= cs.ws_min_pa:
+            raise ValueError("constraint_sizing.ws_max_pa must be > ws_min_pa")
+
+        # Include end point
+        n = int(math.floor((cs.ws_max_pa - cs.ws_min_pa) / cs.ws_step_pa)) + 1
+        grid = cs.ws_min_pa + cs.ws_step_pa * np.arange(n, dtype=float)
+        return np.asarray(grid, dtype=float)
+
+    def _apply_design_point_to_cfg(self, base_cfg: DesignConfig, dp: ADRpyDesignPoint) -> DesignConfig:
+        new_wing = replace(base_cfg.wing, wing_loading_kg_per_m2=float(dp.wing_loading_kg_per_m2))
+        new_pw = replace(
+            base_cfg.p_w,
+            p_w_takeoff_kw_per_kg=float(dp.p_w_takeoff_kw_per_kg),
+            p_w_climb_kw_per_kg=float(dp.p_w_climb_kw_per_kg),
+            p_w_cruise_kw_per_kg=float(dp.p_w_cruise_kw_per_kg),
+        )
+        return replace(base_cfg, wing=new_wing, p_w=new_pw)
+
+    def run(
+        self,
+        *,
+        out_dir: Optional[Path] = None,
+    ) -> Tuple[DesignConfig, Dict[str, PhasePowerResult], MassBreakdown, Optional[pd.DataFrame]]:
+        cs = self._cfg.constraint_sizing
+        if not cs.enable:
+            design = HybridFuelCellAircraftDesign(self._cfg)
+            phases, mass = design.run()
+            return self._cfg, phases, mass, None
+
+        selection = str(cs.selection).strip().lower()
+
+        if selection == "min_mtom":
+            return self._run_min_mtom(out_dir=out_dir)
+
+        # Default: min combined P/W (fast)
+        return self._run_min_combined_pw(out_dir=out_dir)
+
+    def _run_min_combined_pw(
+        self,
+        *,
+        out_dir: Optional[Path],
+    ) -> Tuple[DesignConfig, Dict[str, PhasePowerResult], MassBreakdown, Optional[pd.DataFrame]]:
+        cfg = self._cfg
+        ws_grid = self._wingloading_grid_pa()
+
+        dp, curves, wsmax_cleanstall_pa = self._adr.select_design_point_min_combined_pw(
+            wingloading_pa=ws_grid, mtom_kg=float(cfg.initial_mtom_kg)
+        )
+
+        cfg_used = self._apply_design_point_to_cfg(cfg, dp)
+
+        logger.info(
+            "ADRpy constraint sizing (min_combined_pw): W/S=%.1f Pa (%.2f kg/m^2), "
+            "P/W_TO=%.5f kW/kg, P/W_climb=%.5f kW/kg, P/W_cruise=%.5f kW/kg",
+            dp.wing_loading_pa,
+            dp.wing_loading_kg_per_m2,
+            dp.p_w_takeoff_kw_per_kg,
+            dp.p_w_climb_kw_per_kg,
+            dp.p_w_cruise_kw_per_kg,
+        )
+        if wsmax_cleanstall_pa is not None and dp.wing_loading_pa > wsmax_cleanstall_pa:
+            logger.warning(
+                "Selected W/S exceeds clean stall W/S max (%.1f Pa). Check vstallclean_kcas / CLmax_clean.",
+                wsmax_cleanstall_pa,
+            )
+
+        design = HybridFuelCellAircraftDesign(cfg_used)
+        phases, mass = design.run()
+
+        # Optional single-point dataframe
+        df = pd.DataFrame(
+            [
+                {
+                    "wing_loading_pa": dp.wing_loading_pa,
+                    "wing_loading_kg_per_m2": dp.wing_loading_kg_per_m2,
+                    "p_w_takeoff_kw_per_kg": dp.p_w_takeoff_kw_per_kg,
+                    "p_w_climb_kw_per_kg": dp.p_w_climb_kw_per_kg,
+                    "p_w_cruise_kw_per_kg": dp.p_w_cruise_kw_per_kg,
+                    "mtom_kg": mass.mtom_kg,
+                }
+            ]
+        )
+
+        if out_dir is not None and cfg.constraint_sizing.write_trade_csv:
+            out_dir.mkdir(parents=True, exist_ok=True)
+            df.to_csv(str(out_dir / "constraint_sizing_trade.csv"), index=False)
+
+        return cfg_used, phases, mass, df
+
+    def _run_min_mtom(
+        self,
+        *,
+        out_dir: Optional[Path],
+    ) -> Tuple[DesignConfig, Dict[str, PhasePowerResult], MassBreakdown, Optional[pd.DataFrame]]:
+        cfg = self._cfg
+        cs = cfg.constraint_sizing
+
+        ws_grid = self._wingloading_grid_pa()
+
+        # Compute constraint curves once (P/W vs W/S is independent of MTOM for this model).
+        curves, wsmax_cleanstall_pa = self._adr.power_to_weight_curves_kw_per_kg(
+            wingloading_pa=ws_grid, mtom_kg=float(cfg.initial_mtom_kg)
+        )
+
+        combined = np.asarray(curves.get("combined"), dtype=float)
+        valid = np.isfinite(combined)
+        if wsmax_cleanstall_pa is not None:
+            valid &= ws_grid <= float(wsmax_cleanstall_pa)
+
+        idxs = np.where(valid)[0]
+        if idxs.size == 0:
+            raise RuntimeError("No feasible W/S points for selection='min_mtom' (check constraints / stall limit).")
+
+        # Optional: silence iterative logs during trade scan
+        old_level = logger.level
+        if cs.scan_quiet:
+            logger.setLevel(logging.WARNING)
+
+        rows: List[Dict[str, float]] = []
+        best: Optional[Tuple[float, DesignConfig, Dict[str, PhasePowerResult], MassBreakdown, ADRpyDesignPoint]] = None
+
+        # Seed guesses
+        mtom_seed = float(cfg.initial_mtom_kg)
+        p_seed = float(cfg.initial_total_power_guess_w)
+
+        try:
+            for idx in idxs:
+                dp = self._adr._design_point_from_curves(wingloading_pa=ws_grid, curves=curves, idx=int(idx))
+                cfg_i = self._apply_design_point_to_cfg(cfg, dp)
+
+                # Run mass-closure
+                design = HybridFuelCellAircraftDesign(cfg_i)
+                phases_i, mass_i = design.run(initial_mtom_kg=mtom_seed, initial_total_power_guess_w=p_seed)
+
+                # Update seeds for next point (helps convergence across the scan)
+                mtom_seed = float(mass_i.mtom_kg)
+                p_seed = float(phases_i["climb"].p_total_w)
+
+                rows.append(
+                    {
+                        "wing_loading_pa": dp.wing_loading_pa,
+                        "wing_loading_kg_per_m2": dp.wing_loading_kg_per_m2,
+                        "p_w_takeoff_kw_per_kg": dp.p_w_takeoff_kw_per_kg,
+                        "p_w_climb_kw_per_kg": dp.p_w_climb_kw_per_kg,
+                        "p_w_cruise_kw_per_kg": dp.p_w_cruise_kw_per_kg,
+                        "mtom_kg": float(mass_i.mtom_kg),
+                        "p_total_climb_kw": float(phases_i["climb"].p_total_w) / 1000.0,
+                        "p_total_cruise_kw": float(phases_i["cruise"].p_total_w) / 1000.0,
+                        "p_total_takeoff_kw": float(phases_i["takeoff"].p_total_w) / 1000.0,
+                    }
+                )
+
+                if best is None or mass_i.mtom_kg < best[0]:
+                    best = (float(mass_i.mtom_kg), cfg_i, phases_i, mass_i, dp)
+
+        finally:
+            if cs.scan_quiet:
+                logger.setLevel(old_level)
+
+        if best is None:
+            raise RuntimeError("No feasible designs found during selection='min_mtom' scan.")
+
+        best_mtom, best_cfg, best_phases, best_mass, best_dp = best
+
+        logger.info(
+            "ADRpy+HFCAD coupled sizing (min_mtom): W/S=%.1f Pa (%.2f kg/m^2), MTOM=%.1f kg, "
+            "P/W_TO=%.5f, P/W_climb=%.5f, P/W_cruise=%.5f (kW/kg)",
+            best_dp.wing_loading_pa,
+            best_dp.wing_loading_kg_per_m2,
+            best_mtom,
+            best_dp.p_w_takeoff_kw_per_kg,
+            best_dp.p_w_climb_kw_per_kg,
+            best_dp.p_w_cruise_kw_per_kg,
+        )
+
+        df = pd.DataFrame(rows)
+        if out_dir is not None and cs.write_trade_csv:
+            out_dir.mkdir(parents=True, exist_ok=True)
+            df.sort_values("wing_loading_pa", inplace=True)
+            df.to_csv(str(out_dir / "constraint_sizing_trade.csv"), index=False)
+
+        return best_cfg, best_phases, best_mass, df
 
 
 # ============================
@@ -1726,6 +2269,14 @@ def _converged_summary_text(
         f"Vtankex: {mass.tank_volume_m3:,.1f} m^3",
         "========================== END ==============================",
     ]
+    if cfg.constraint_sizing.enable:
+        hdr = [
+            f"Constraint sizing: ENABLED ({cfg.constraint_sizing.selection})",
+            f"Input W/S: {cfg.wing.wing_loading_kg_per_m2:,.2f} kg/m^2 ({cfg.wing.wing_loading_kg_per_m2*_G0_MPS2:,.1f} Pa)",
+            f"Input P/W [kW/kg]: takeoff {cfg.p_w.p_w_takeoff_kw_per_kg:.5f}, climb {cfg.p_w.p_w_climb_kw_per_kg:.5f}, cruise {cfg.p_w.p_w_cruise_kw_per_kg:.5f}",
+            "-------------------------------------------------------------",
+        ]
+        lines = lines[:3] + hdr + lines[3:]
     return "\n".join(lines)
 
 
@@ -1789,23 +2340,30 @@ def main(argv: Optional[List[str]] = None) -> None:
 
     cfg = load_design_config(input_path)
 
-    design = HybridFuelCellAircraftDesign(cfg)
-    phases, mass = design.run()
-
-    _print_summary(phases, mass, cfg)
-
     out_root = Path(args.outdir).expanduser()
     out_dir = out_root / _output_subdir_from_input(input_path)
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Copy the input file into the output folder for traceability
     input_copy_path = out_dir / input_path.name
     if input_copy_path.resolve() != input_path.resolve():
         shutil.copy2(input_path, input_copy_path)
 
-    writer = OutputWriter(cfg)
+    if cfg.constraint_sizing.enable:
+        runner = CoupledConstraintSizingRunner(cfg)
+        cfg_used, phases, mass, _trade_df = runner.run(out_dir=out_dir)
+    else:
+        cfg_used = cfg
+        design = HybridFuelCellAircraftDesign(cfg_used)
+        phases, mass = design.run()
+
+    _print_summary(phases, mass, cfg_used)
+
+    writer = OutputWriter(cfg_used)
     writer.write_converged_text(phases=phases, mass=mass, out_dir=out_dir)
 
     # Fuel cell figure (per nacelle at design point)
-    nacelle_power_w = phases["climb"].p_total_w / cfg.fuel_cell_arch.n_stacks_parallel
+    nacelle_power_w = phases["climb"].p_total_w / cfg_used.fuel_cell_arch.n_stacks_parallel
     writer.write_pemfc_figure(nacelle_power_w=nacelle_power_w, out_dir=out_dir)
 
     # Mission profile plot and Excel
@@ -1825,3 +2383,4 @@ if __name__ == "__main__":
     print("\n\n=============================================================")
     print(f'Execution time: {elapsed_time:.1f} seconds')
     print("=============================================================")
+
