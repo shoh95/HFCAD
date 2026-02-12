@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import configparser
 import shutil
+import threading
 
 import time
 import math
@@ -1119,18 +1120,18 @@ class MassEstimator:
             rho_a_cruise=self._rho_cr,
             v_cruise=self._v_cr_mps,
             t_r_HT=0.09,
-            S_HT=4.5404,
-            S_VT=4.4004,
+            S_HT=1.82,
+            S_VT=2.54,
             t_r_VT=0.09 * 1.361,
             L_HT_act=float(conv.meter_feet(cfg.fuselage.lht_ft, "meter")),
-            b_HT=4.765,
-            b_VT=2.907,
+            b_HT=3.0,
+            b_VT=2.5,
             FL=fuselage_length_m,
             Wf_mm=float(cfg.fuselage.dfus_m * 1000.0),
             hf_mm=float(cfg.fuselage.dfus_m * 1000.0),
             W_press=0.0,
             l_n_mm=float(conv.meter_feet(lnose_ft, "meter") * 1000.0),
-            Croot=2.430,
+            Croot=1.5,
             tc_r=cfg.wing.t_c,
             n_ult=cfg.wing.n_ult,
             Swet_fus=swet_fus_m2,
@@ -1382,7 +1383,13 @@ class OutputWriter:
     def __init__(self, cfg: DesignConfig):
         self._cfg = cfg
 
-    def write_pemfc_figure(self, *, nacelle_power_w: float, out_dir: Path) -> None:
+    def write_pemfc_figure(
+        self,
+        *,
+        nacelle_power_w: float,
+        out_dir: Path,
+        timeout_s: float = 30.0,
+    ) -> None:
         """Generate PEMFC polarization figure once (expensive)."""
 
         try:
@@ -1394,7 +1401,7 @@ class OutputWriter:
                 oversizing=self._cfg.fuel_cell_op.oversizing,
                 comp_bool=True,
                 make_fig=True,
-                verbose=True,
+                verbose=False,
             )
             if not res.figs:
                 return
@@ -1403,7 +1410,29 @@ class OutputWriter:
             figs_dir = out_dir / "figs"
             figs_dir.mkdir(parents=True, exist_ok=True)
             save_path = figs_dir / "pemfc_fig.png"
-            fig.write_image(str(save_path))
+            write_error: List[Exception] = []
+            done = threading.Event()
+
+            def _save_image() -> None:
+                try:
+                    fig.write_image(str(save_path))
+                except Exception as e:  # pragma: no cover - runtime/tooling dependent
+                    write_error.append(e)
+                finally:
+                    done.set()
+
+            t = threading.Thread(target=_save_image, daemon=True)
+            t.start()
+            if not done.wait(timeout=float(timeout_s)):
+                logger.warning(
+                    "Skipping PEMFC figure export: timed out after %.1f s while writing %s",
+                    timeout_s,
+                    save_path,
+                )
+                return
+
+            if write_error:
+                raise write_error[0]
         except Exception as e:
             logger.warning("Could not generate PEMFC figure: %s", e)
 
