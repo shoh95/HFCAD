@@ -1541,79 +1541,101 @@ class OutputWriter:
         df = pd.DataFrame(req_pow, columns=["ReqPow_AC", "ReqPow_FC", "ReqPow_Batt"]).T
         df.to_excel(str(out_dir / "ReqPowDATA.xlsx"), index=True)
 
+    def write_converged_text(
+        self,
+        *,
+        phases: Dict[str, PhasePowerResult],
+        mass: MassBreakdown,
+        out_dir: Path,
+    ) -> None:
+        """Write converged summary text to the output directory."""
+
+        out_dir.mkdir(parents=True, exist_ok=True)
+        summary_path = out_dir / "ConvergedData.txt"
+        summary_text = _converged_summary_text(phases=phases, mass=mass, cfg=self._cfg)
+        summary_path.write_text(summary_text + "\n", encoding="utf-8")
+
 
 # ============================
 # Entry point
 # ============================
 
 
+def _converged_summary_text(
+    phases: Dict[str, PhasePowerResult],
+    mass: MassBreakdown,
+    cfg: DesignConfig,
+) -> str:
+    """Converged summary used for console output and text export."""
+
+    pnet = phases["climb"].p_total_w * cfg.eff.eta_pdu * cfg.eff.eta_em
+    nac = phases["climb"].nacelle
+
+    lines = [
+        "=============================================================",
+        "========================= CONVERGED =========================",
+        "=============================================================",
+        f"S_wing: {mass.wing_area_m2:,.2f} m^2",
+        f"b_wing: {mass.wing_span_m:,.2f} m",
+        f"Lfus: {mass.fuselage_length_m:,.2f} m",
+        f"Ltank: {mass.tank_length_m:,.2f} m",
+        f"Ptotal_climb: {phases['climb'].p_total_w/1000:,.0f} kW",
+        f"Ptotal_cruise: {phases['cruise'].p_total_w/1000:,.0f} kW",
+        f"Ptotal_takeoff: {phases['takeoff'].p_total_w/1000:,.0f} kW",
+        f"Pelectricnet: {phases['climb'].p_bus_required_w/1000:,.0f} kW",
+        f"Pcomp: {phases['climb'].p_comp_w/1000:,.0f} kW",
+        f"Pcoolingsystem: {phases['climb'].p_cooling_w/1000:,.0f} kW",
+        f"Pnet: {pnet/1000:,.0f} kW",
+        f"eta_pt: {cfg.eff.eta_em*cfg.eff.eta_pdu:,.4f}",
+        "",
+        "Per Nacelle",
+        (
+            f"Stack(1/{cfg.fuel_cell_arch.n_stacks_parallel}): {nac.m_stacks_kg:,.0f} kg, "
+            f"Compressor: {nac.m_comp_kg:,.0f} kg, Humidifier: {nac.m_humid_kg:,.0f} kg, HX: {nac.m_hx_kg:,.0f} kg"
+        ),
+        f"Power density of Nacelle System: {mass.nacelle_design_power_kw_per_kg:,.3f} kW/kg",
+        f"dim_hx: dX={mass.nacelle_hx_dim_m[0]:,.3f} m, dY={mass.nacelle_hx_dim_m[1]:,.3f} m, dZ={mass.nacelle_hx_dim_m[2]:,.3f} m",
+        f"dim_stack: dX={mass.nacelle_stack_dim_m[2]:,.3f} m, dY={mass.nacelle_stack_dim_m[0]:,.3f} m, dZ={mass.nacelle_stack_dim_m[1]:,.3f} m",
+        "",
+        "ALL Nacelles",
+        f"FCS(FC+Humidifier+Comp+Hx): {mass.m_fc_system_kg:,.0f} kg",
+        f"mPMAD: {mass.m_pmad_kg:,.0f} kg",
+        f"Electric Motors: {mass.m_e_motor_kg:,.0f} kg",
+        "",
+        "-----------------------",
+        f"Powertrain(FCS+PMAD+Motors): {mass.m_powertrain_total_kg:,.0f} kg",
+        f"mtank: {mass.m_tank_kg:,.0f} kg",
+        f"W_wing: {mass.w_wing_kg:,.0f} kg",
+        f"W_HT: {mass.w_ht_kg:,.0f} kg",
+        f"W_VT: {mass.w_vt_kg:,.0f} kg",
+        f"W_fus: {mass.w_fus_kg:,.0f} kg",
+        f"W_lndgearmain: {mass.w_lnd_main_kg:,.0f} kg",
+        f"W_lndgearnose: {mass.w_lnd_nose_kg:,.0f} kg",
+        f"W_motor: {mass.w_motor_misc_kg:,.0f} kg",
+        f"W_flight_control: {mass.w_flight_control_kg:,.0f} kg",
+        f"W_els: {mass.w_els_kg:,.0f} kg",
+        f"W_iae: {mass.w_iae_kg:,.0f} kg",
+        f"W_hydraulics: {mass.w_hydraulics_kg:,.0f} kg",
+        f"W_fur: {mass.w_furnishings_kg:,.0f} kg",
+        f"OEM: {mass.oem_kg:,.0f} kg",
+        f"OEMmisc: {mass.oem_misc_kg:,.0f} kg",
+        f"mfuel: {mass.m_fuel_kg:,.1f} kg",
+        f"mbatt: {mass.m_battery_kg:,.1f} kg",
+        f"mdot_H2(cruise): {phases['cruise'].mdot_h2_kgps*1000:,.1f} g/s",
+        "-----------------------",
+        f"MTOM: {mass.mtom_kg:,.0f} kg",
+        "",
+        f"Vtankex: {mass.tank_volume_m3:,.1f} m^3",
+        "========================== END ==============================",
+    ]
+    return "\n".join(lines)
+
+
 def _print_summary(phases: Dict[str, PhasePowerResult], mass: MassBreakdown, cfg: DesignConfig) -> None:
     """Console report similar to the legacy script."""
 
-    conv = Conversions()
-
-    pnet = phases["climb"].p_total_w * cfg.eff.eta_pdu * cfg.eff.eta_em
-
-    print("\n=============================================================")
-    print("========================= CONVERGED =========================")
-    print("=============================================================")
-
-    print(f"S_wing: {mass.wing_area_m2:,.2f} m^2")
-    print(f"b_wing: {mass.wing_span_m:,.2f} m")
-    print(f"Lfus: {mass.fuselage_length_m:,.2f} m")
-    print(f"Ltank: {mass.tank_length_m:,.2f} m")
-
-    print(f"Ptotal_climb: {phases['climb'].p_total_w/1000:,.0f} kW")
-    print(f"Ptotal_cruise: {phases['cruise'].p_total_w/1000:,.0f} kW")
-    print(f"Ptotal_takeoff: {phases['takeoff'].p_total_w/1000:,.0f} kW")
-    print(f"Pelectricnet: {phases['climb'].p_bus_required_w/1000:,.0f} kW")
-    print(f"Pcomp: {phases['climb'].p_comp_w/1000:,.0f} kW")
-    print(f"Pcoolingsystem: {phases['climb'].p_cooling_w/1000:,.0f} kW")
-    print(f"Pnet: {pnet/1000:,.0f} kW")
-    print(f"eta_pt: {cfg.eff.eta_em*cfg.eff.eta_pdu:,.4f}")
-
-    print("\nPer Nacelle")
-    nac = phases["climb"].nacelle
-    print(
-        f"Stack(1/{cfg.fuel_cell_arch.n_stacks_parallel}): {nac.m_stacks_kg:,.0f} kg, "
-        f"Compressor: {nac.m_comp_kg:,.0f} kg, Humidifier: {nac.m_humid_kg:,.0f} kg, HX: {nac.m_hx_kg:,.0f} kg"
-    )
-    print(f"Power density of Nacelle System: {mass.nacelle_design_power_kw_per_kg:,.3f} kW/kg")
-    print(f"dim_hx: dX={mass.nacelle_hx_dim_m[0]:,.3f} m, dY={mass.nacelle_hx_dim_m[1]:,.3f} m, dZ={mass.nacelle_hx_dim_m[2]:,.3f} m")
-    print(f"dim_stack: dX={mass.nacelle_stack_dim_m[2]:,.3f} m, dY={mass.nacelle_stack_dim_m[0]:,.3f} m, dZ={mass.nacelle_stack_dim_m[1]:,.3f} m")
-
-    print("\nALL Nacelles")
-    print(f"FCS(FC+Humidifier+Comp+Hx): {mass.m_fc_system_kg:,.0f} kg")
-    print(f"mPMAD: {mass.m_pmad_kg:,.0f} kg")
-    print(f"Electric Motors: {mass.m_e_motor_kg:,.0f} kg")
-
-    print("\n-----------------------")
-    print(f"Powertrain(FCS+PMAD+Motors): {mass.m_powertrain_total_kg:,.0f} kg")
-    print(f"mtank: {mass.m_tank_kg:,.0f} kg")
-    print(f"W_wing: {mass.w_wing_kg:,.0f} kg")
-    print(f"W_HT: {mass.w_ht_kg:,.0f} kg")
-    print(f"W_VT: {mass.w_vt_kg:,.0f} kg")
-    print(f"W_fus: {mass.w_fus_kg:,.0f} kg")
-    print(f"W_lndgearmain: {mass.w_lnd_main_kg:,.0f} kg")
-    print(f"W_lndgearnose: {mass.w_lnd_nose_kg:,.0f} kg")
-
-    print(f"W_motor: {mass.w_motor_misc_kg:,.0f} kg")
-    print(f"W_flight_control: {mass.w_flight_control_kg:,.0f} kg")
-    print(f"W_els: {mass.w_els_kg:,.0f} kg")
-    print(f"W_iae: {mass.w_iae_kg:,.0f} kg")
-    print(f"W_hydraulics: {mass.w_hydraulics_kg:,.0f} kg")
-    print(f"W_fur: {mass.w_furnishings_kg:,.0f} kg")
-
-    print(f"OEM: {mass.oem_kg:,.0f} kg")
-    print(f"OEMmisc: {mass.oem_misc_kg:,.0f} kg")
-    print(f"mfuel: {mass.m_fuel_kg:,.1f} kg")
-    print(f"mbatt: {mass.m_battery_kg:,.1f} kg")
-    print(f"mdot_H2(cruise): {phases['cruise'].mdot_h2_kgps*1000:,.1f} g/s")
-    print("-----------------------")
-    print(f"MTOM: {mass.mtom_kg:,.0f} kg")
-
-    print(f"\nVtankex: {mass.tank_volume_m3:,.1f} m^3")
-    print("========================== END ==============================")
+    print()
+    print(_converged_summary_text(phases=phases, mass=mass, cfg=cfg))
 
 
 def _output_subdir_from_input(input_path: Path) -> str:
@@ -1640,7 +1662,7 @@ def main(argv: Optional[List[str]] = None) -> None:
     parser.add_argument(
         "--outdir",
         default=str(Path.cwd()),
-        help="Output directory for plots and ReqPowDATA.xlsx.",
+        help="Output directory for plots, ReqPowDATA.xlsx, and converged text summary.",
     )
     parser.add_argument(
         "--show-plot",
@@ -1682,6 +1704,7 @@ def main(argv: Optional[List[str]] = None) -> None:
         shutil.copy2(input_path, input_copy_path)
 
     writer = OutputWriter(cfg)
+    writer.write_converged_text(phases=phases, mass=mass, out_dir=out_dir)
 
     # Fuel cell figure (per nacelle at design point)
     nacelle_power_w = phases["climb"].p_total_w / cfg.fuel_cell_arch.n_stacks_parallel
