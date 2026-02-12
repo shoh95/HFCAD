@@ -2297,6 +2297,7 @@ def _converged_summary_text(
 
     pnet = phases["climb"].p_total_w * cfg.eff.eta_pdu * cfg.eff.eta_em
     nac = phases["climb"].nacelle
+    comp_mass_report_kg = float(phases["cruise"].nacelle.m_comp_kg)
     p_to_w_converged_w_per_kg = phases["climb"].p_total_w / mass.mtom_kg
     wing_loading_kg_per_m2 = mass.mtom_kg / mass.wing_area_m2
 
@@ -2320,7 +2321,7 @@ def _converged_summary_text(
         "Per Nacelle",
         (
             f"Stack(1/{cfg.fuel_cell_arch.n_stacks_parallel}): {nac.m_stacks_kg:,.0f} kg, "
-            f"Compressor: {nac.m_comp_kg:,.0f} kg, Humidifier: {nac.m_humid_kg:,.0f} kg, HX: {nac.m_hx_kg:,.0f} kg"
+            f"Compressor: {comp_mass_report_kg:,.0f} kg, Humidifier: {nac.m_humid_kg:,.0f} kg, HX: {nac.m_hx_kg:,.0f} kg"
         ),
         f"Power density of Nacelle System: {mass.nacelle_design_power_kw_per_kg:,.3f} kW/kg",
         f"dim_hx: dX={mass.nacelle_hx_dim_m[0]:,.3f} m, dY={mass.nacelle_hx_dim_m[1]:,.3f} m, dZ={mass.nacelle_hx_dim_m[2]:,.3f} m",
