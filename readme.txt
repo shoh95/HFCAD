@@ -1,2 +1,2 @@
 run command:
-python app/main.py -i app/input_RIMP-03_260201-0114.ini --outdir results/
+python app/main.py -i app/input_RIMP9_260213-0440.ini --outdir results/
