@@ -1,0 +1,20 @@
+Traceback (most recent call last):
+  File "/home/shoh95/Programming/HFCAD/app/main.py", line 2481, in <module>
+    main()
+  File "/home/shoh95/Programming/HFCAD/app/main.py", line 2442, in main
+    cfg = load_design_config(input_path)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/shoh95/Programming/HFCAD/app/main.py", line 714, in load_design_config
+    hydrogen = _update_dataclass_from_section(cfg_default.hydrogen, "hydrogen", section("hydrogen"))
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/shoh95/Programming/HFCAD/app/main.py", line 657, in _update_dataclass_from_section
+    updates[f.name] = _coerce_value(section[f.name], f.type)
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/shoh95/Programming/HFCAD/app/main.py", line 580, in _coerce_value
+    return float(s)
+           ^^^^^^^^
+ValueError: could not convert string to float: '1500000.0# Range 1500km'
+
+[run_sweep] FAIL criteria: artifact not found or empty
+[run_sweep] expected artifact: results/input_sweep_r1/h4000_M0.45_R1500km_PL1000kg/ConvergedData.txt
+[run_sweep] exit code: 1
