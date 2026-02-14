@@ -17,6 +17,8 @@ from main import size_system
 
 import cadquery as cq
 from cadquery import exporters, importers
+import os
+from pathlib import Path
 import streamlit as st
 import pandas as pd
 import plotly.express as px
@@ -25,6 +27,20 @@ from stpyvista import stpyvista
 from ambiance import Atmosphere
 import numpy as np
 
+APP_DIR = Path(__file__).resolve().parent
+REPO_ROOT = APP_DIR.parent
+MEDIA_INPUT_DIR = REPO_ROOT / "media"
+MEDIA_OUTPUT_DIR = Path(
+    os.getenv("HFCAD_MEDIA_DIR", str(REPO_ROOT / "results" / "gui" / "media"))
+).expanduser()
+MEDIA_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+# Keep legacy model exports aligned with GUI output media directory.
+os.environ.setdefault("HFCAD_MEDIA_DIR", str(MEDIA_OUTPUT_DIR))
+
+
+def _media_out_path(filename: str) -> Path:
+    return MEDIA_OUTPUT_DIR / filename
+
 
 def generate_system_geometry():
     """
@@ -32,34 +48,38 @@ def generate_system_geometry():
 
     Note: currently fixed dummy dimensions are used, that's why this function has no inputs yet.
 
-    The resulting geometries are saved individually as stl files in the media directory.
+    The resulting geometries are saved individually as STL files in the output media directory.
     """
     n_stack_series = 2
     gap = 0.1
     exporters.export(cq.Workplane("front").box(1.5 - gap, 2, 0.5).translate((-0.75, 0, 0.5 + gap)),
-                     "media/stack_1.stl")
+                     str(_media_out_path("stack_1.stl")))
     exporters.export(cq.Workplane("front").box(1.5 - gap, 2, 0.5).translate((0.75, 0, 0.5 + gap)),
-                     "media/stack_2.stl")
+                     str(_media_out_path("stack_2.stl")))
 
     exporters.export(cq.Workplane("front").box(1.5, 1.5, 0.5).translate((0.3, 0, 2 * (0.5 + gap))),
-                     "media/humidifier.stl")
+                     str(_media_out_path("humidifier.stl")))
 
     exporters.export(cq.Workplane("front").box(3, 1.5, 0.5),
-                     "media/hx.stl")
+                     str(_media_out_path("hx.stl")))
 
     exporters.export(cq.Workplane("left").circle(0.25).extrude(0.75).translate((-0.5, 0, 2 * (0.5 + gap))),
-                     "media/compressor.stl")
+                     str(_media_out_path("compressor.stl")))
 
     exporters.export(cq.Workplane("left").circle(0.75).extrude(0.4).translate((-1.5, 0, 0.5 + gap)),
-                     "media/em.stl")
+                     str(_media_out_path("em.stl")))
 
-    pts = np.genfromtxt("media/airfoil.dat") * 3.5
+    airfoil_path = MEDIA_INPUT_DIR / "airfoil.dat"
+    if not airfoil_path.exists():
+        airfoil_path = _media_out_path("airfoil.dat")
+
+    pts = np.genfromtxt(str(airfoil_path)) * 3.5
     exporters.export(
         cq.Workplane("top").spline(pts).close().revolve(360, (-1, -1, 0), (1, -1, 0)).translate((-2, 0, -0.5)),
-        "media/nacelle.stl")
+        str(_media_out_path("nacelle.stl")))
 
-    # prop = importers.importStep("media/Prop2.stp")
-    # exporters.export(prop, "media/prop.stl")
+    # prop = importers.importStep(str(MEDIA_INPUT_DIR / "Prop2.stp"))
+    # exporters.export(prop, str(_media_out_path("prop.stl")))
 
 
 # ## Start of the GUI script
@@ -187,38 +207,38 @@ with col1:
     plotter = pv.Plotter(window_size=[400, 400])
     plotter.background_color = "#0e1117"
 
-    reader = pv.STLReader("media/hx.stl")
+    reader = pv.STLReader(str(_media_out_path("hx.stl")))
     mesh = reader.read()
     plotter.add_mesh(mesh, color="red", label="Heat exchanger")
 
-    reader = pv.STLReader("media/stack_1.stl")
+    reader = pv.STLReader(str(_media_out_path("stack_1.stl")))
     mesh = reader.read()
     plotter.add_mesh(mesh, color="green", label="Stack")
 
-    reader = pv.STLReader("media/stack_2.stl")
+    reader = pv.STLReader(str(_media_out_path("stack_2.stl")))
     mesh = reader.read()
     plotter.add_mesh(mesh, color="green", label="Stack")
 
-    reader = pv.STLReader("media/humidifier.stl")
+    reader = pv.STLReader(str(_media_out_path("humidifier.stl")))
     mesh = reader.read()
     plotter.add_mesh(mesh, color="blue", label="Stack")
 
-    reader = pv.STLReader("media/compressor.stl")
+    reader = pv.STLReader(str(_media_out_path("compressor.stl")))
     mesh = reader.read()
     plotter.add_mesh(mesh, color="yellow", label="Stack")
 
-    reader = pv.STLReader("media/nacelle.stl")
+    reader = pv.STLReader(str(_media_out_path("nacelle.stl")))
     mesh = reader.read()
     plotter.add_mesh(mesh, label="Nacelle", opacity=0.5)
 
-    reader = pv.STLReader("media/em.stl")
+    reader = pv.STLReader(str(_media_out_path("em.stl")))
     mesh = reader.read()
     plotter.add_mesh(mesh, label="EM", color="orange")
     plotter.view_isometric()
 
     # plotter.show()
 
-    # reader = pv.STLReader("media/prop.stl")
+    # reader = pv.STLReader(str(_media_out_path("prop.stl")))
     # mesh = reader.read()
     # plotter.add_mesh(mesh)
 
@@ -228,7 +248,7 @@ with col1:
 
     st.header("Compressor geometry")
 
-    reader = pv.STLReader("media/comp.stl")
+    reader = pv.STLReader(str(_media_out_path("comp.stl")))
     plotter = pv.Plotter(
         window_size=[400, 400])
     plotter.background_color = "#0e1117"

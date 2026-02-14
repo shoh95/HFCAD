@@ -1,10 +1,13 @@
 import cadquery as cq
 from cadquery import exporters
+import os
+from pathlib import Path
+from typing import Optional
 
 rho_ss = 8e3  # kg/m3 - SS304L
 
 
-def compressor_mass_model(geom, power):
+def compressor_mass_model(geom, power, stl_path: Optional[Path] = None):
     """
     Determine compressor weight from geometry and power required. For details see report.
 
@@ -66,7 +69,13 @@ def compressor_mass_model(geom, power):
         res = res.union(part)
     
     #res = backplate.union(imp).union(cas_res3_c)
-    exporters.export(res, "media/comp.stl")
+    if stl_path is None:
+        media_dir_env = os.getenv("HFCAD_MEDIA_DIR")
+        target_path = (Path(media_dir_env) / "comp.stl") if media_dir_env else Path("media/comp.stl")
+    else:
+        target_path = Path(stl_path)
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    exporters.export(res, str(target_path))
 
     # sum up the material volumes of all parts, scale down and mulitply with material density
     m_cu = sum([part.objects[0].Volume() for part in parts]) / 100**3 * rho_ss

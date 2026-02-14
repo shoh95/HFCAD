@@ -1018,8 +1018,9 @@ class CoolingSystem:
 class FuelCellSystemModel:
     """Fuel cell system sizing model (per nacelle)."""
 
-    def __init__(self, arch: FuelCellArchitecture):
+    def __init__(self, arch: FuelCellArchitecture, comp_stl_path: Optional[Path] = None):
         self._arch = arch
+        self._comp_stl_path = comp_stl_path
 
     def size_nacelle(
         self,
@@ -1107,7 +1108,11 @@ class FuelCellSystemModel:
                         tol,
                     )
 
-            m_comp = float(compressor_mass_model(geom_comp, power_comp)) if geom_comp is not None else 0.0
+            m_comp = (
+                float(compressor_mass_model(geom_comp, power_comp, stl_path=self._comp_stl_path))
+                if geom_comp is not None
+                else 0.0
+            )
         else:
             m_comp = 0.0
             power_comp = 0.0
@@ -1266,8 +1271,9 @@ class PhasePowerSolver:
 class MassEstimator:
     """Computes MTOM from phase results and empirical weight models."""
 
-    def __init__(self, *, cfg: DesignConfig):
+    def __init__(self, *, cfg: DesignConfig, comp_stl_path: Optional[Path] = None):
         self._cfg = cfg
+        self._comp_stl_path = comp_stl_path
         self._conv = Conversions()
 
         # Pre-compute cruise environment
@@ -1305,7 +1311,10 @@ class MassEstimator:
         power_fc_sys_total = max(power_fc_sys_total, 1.0)
         power_fc_sys_per_nacelle = power_fc_sys_total / cfg.fuel_cell_arch.n_stacks_parallel
 
-        nacelle_design = FuelCellSystemModel(cfg.fuel_cell_arch).size_nacelle(
+        nacelle_design = FuelCellSystemModel(
+            cfg.fuel_cell_arch,
+            comp_stl_path=self._comp_stl_path,
+        ).size_nacelle(
             power_fc_sys_w=power_fc_sys_per_nacelle,
             flight_point=FlightPoint(cfg.flight.h_cr_m, cfg.flight.mach_cr),
             beta=self._beta_cruise,
@@ -1586,8 +1595,9 @@ class MassEstimator:
 class HybridFuelCellAircraftDesign:
     """Top-level orchestrator."""
 
-    def __init__(self, cfg: DesignConfig):
+    def __init__(self, cfg: DesignConfig, out_dir: Optional[Path] = None):
         self._cfg = cfg
+        self._comp_stl_path = (out_dir / "media" / "comp.stl") if out_dir is not None else None
         self._rho_cr = float(Atmosphere(cfg.flight.h_cr_m).density[0])
         self._beta_cruise, self._beta_cruise_charger = _resolve_cruise_betas(
             cfg.fuel_cell_op.beta,
@@ -1600,14 +1610,14 @@ class HybridFuelCellAircraftDesign:
             cruise_mach=cfg.flight.mach_cr,
             cfg=cfg.cooling,
         )
-        self._fc_model = FuelCellSystemModel(cfg.fuel_cell_arch)
+        self._fc_model = FuelCellSystemModel(cfg.fuel_cell_arch, comp_stl_path=self._comp_stl_path)
         self._phase_solver = PhasePowerSolver(
             config=cfg,
             powertrain=self._powertrain,
             fc_model=self._fc_model,
             cooling=self._cooling,
         )
-        self._mass_estimator = MassEstimator(cfg=cfg)
+        self._mass_estimator = MassEstimator(cfg=cfg, comp_stl_path=self._comp_stl_path)
 
     def run(
         self,
@@ -1937,7 +1947,7 @@ class CoupledConstraintSizingRunner:
     ) -> Tuple[DesignConfig, Dict[str, PhasePowerResult], MassBreakdown, Optional[pd.DataFrame]]:
         cs = self._cfg.constraint_sizing
         if not cs.enable:
-            design = HybridFuelCellAircraftDesign(self._cfg)
+            design = HybridFuelCellAircraftDesign(self._cfg, out_dir=out_dir)
             phases, mass = design.run()
             return self._cfg, phases, mass, None
 
@@ -1978,7 +1988,7 @@ class CoupledConstraintSizingRunner:
                 wsmax_cleanstall_pa,
             )
 
-        design = HybridFuelCellAircraftDesign(cfg_used)
+        design = HybridFuelCellAircraftDesign(cfg_used, out_dir=out_dir)
         phases, mass = design.run()
 
         # Optional single-point dataframe
@@ -2043,7 +2053,7 @@ class CoupledConstraintSizingRunner:
                 cfg_i = self._apply_design_point_to_cfg(cfg, dp)
 
                 # Run mass-closure
-                design = HybridFuelCellAircraftDesign(cfg_i)
+                design = HybridFuelCellAircraftDesign(cfg_i, out_dir=out_dir)
                 phases_i, mass_i = design.run(initial_mtom_kg=mtom_seed, initial_total_power_guess_w=p_seed)
 
                 # Update seeds for next point (helps convergence across the scan)
@@ -2120,7 +2130,7 @@ class OutputWriter:
         """Generate PEMFC polarization figure once (expensive)."""
 
         try:
-            fc = FuelCellSystemModel(self._cfg.fuel_cell_arch)
+            fc = FuelCellSystemModel(self._cfg.fuel_cell_arch, comp_stl_path=out_dir / "media" / "comp.stl")
             res = fc.size_nacelle(
                 power_fc_sys_w=nacelle_power_w,
                 flight_point=FlightPoint(self._cfg.flight.h_cr_m, self._cfg.flight.mach_cr),
@@ -2252,7 +2262,7 @@ class OutputWriter:
 
         plt.xlabel("Time(min)")
         plt.ylabel("Power(kW)")
-        plt.axis([0, 180, -200, 1500])
+        plt.axis([0, 180, -200, 1400])
         plt.title("Power Mission Profile")
         plt.legend(loc="upper right")
         plt.grid(True)
@@ -2445,7 +2455,7 @@ def main(argv: Optional[List[str]] = None) -> None:
         cfg_used, phases, mass, _trade_df = runner.run(out_dir=out_dir)
     else:
         cfg_used = cfg
-        design = HybridFuelCellAircraftDesign(cfg_used)
+        design = HybridFuelCellAircraftDesign(cfg_used, out_dir=out_dir)
         phases, mass = design.run()
 
     _print_summary(phases, mass, cfg_used)
