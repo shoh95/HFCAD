@@ -2252,7 +2252,7 @@ class OutputWriter:
 
         plt.xlabel("Time(min)")
         plt.ylabel("Power(kW)")
-        plt.axis([0, 180, -200, 2500])
+        plt.axis([0, 180, -200, 1500])
         plt.title("Power Mission Profile")
         plt.legend(loc="upper right")
         plt.grid(True)
