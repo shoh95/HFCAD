@@ -260,6 +260,29 @@ class SolverConfig:
     max_outer_iter: int = 50
     max_inner_iter: int = 50
 
+    # Outer-loop MTOM closure algorithm:
+    #   - 'newton' (default): safeguarded Newton/secant with trust region + bracketing fallback
+    #   - 'fixed_point': legacy behaviour (mtom <- mtom_est)
+    mtom_solver: str = "newton"
+
+    # Newton/secant safeguards
+    newton_max_rel_step: float = 0.50  # limit |ΔMTOM| ≤ this * MTOM (per outer iteration)
+    newton_min_step_kg: float = 0.1  # avoid stalling when far from tolerance
+    newton_slope_eps: float = 1e-6  # treat |dr/dMTOM| below this as unreliable
+
+    # Damping / relaxation factors (applied to derivative-based steps)
+    newton_relax_init: float = 1.0
+    newton_relax_min: float = 0.1
+    newton_relax_decrease: float = 0.5
+    newton_relax_increase: float = 1.2
+
+    # Fixed-point fallback relaxation (mtom_next = mtom + relax * residual)
+    newton_fp_relax: float = 1.0
+
+    # Bracketing: when a sign change in the residual is detected, keep the root bracketed
+    # and fall back to bisection/regula-falsi if the Newton proposal is unsafe.
+    newton_use_bracketing: bool = True
+
 
 
 @dataclass(frozen=True)
@@ -1627,12 +1650,19 @@ class HybridFuelCellAircraftDesign:
     ) -> Tuple[Dict[str, PhasePowerResult], MassBreakdown]:
         cfg = self._cfg
 
+        # -----------------
         # Initial conditions
+        # -----------------
         mtom = float(cfg.initial_mtom_kg if initial_mtom_kg is None else initial_mtom_kg)
+        if not math.isfinite(mtom) or mtom <= 0.0:
+            raise ValueError(f"initial_mtom_kg must be a positive finite number, got {mtom!r}")
 
         p0 = float(
             cfg.initial_total_power_guess_w if initial_total_power_guess_w is None else initial_total_power_guess_w
         )
+        if (not math.isfinite(p0)) or p0 <= 0.0:
+            p0 = float(cfg.initial_total_power_guess_w)
+
         ptotal_guess = {
             "cruise": p0,
             "cruise_charger": p0,
@@ -1642,9 +1672,61 @@ class HybridFuelCellAircraftDesign:
 
         phases: Dict[str, PhasePowerResult] = {}
 
+        # -----------------
+        # MTOM convergence (outer loop)
+        # -----------------
+        # Solve the MTOM mass-closure equation:
+        #     residual(mtom) = mtom_estimated(mtom) - mtom = 0
+        #
+        # The legacy approach used a fixed-point iteration (mtom <- mtom_est).
+        # That can converge very slowly when d(mtom_est)/d(mtom) ~ 1.
+        #
+        # Here we use a safeguarded Newton/secant update with:
+        #   - trust-region step limiting (max relative MTOM change per iteration)
+        #   - adaptive damping (relaxation factor)
+        #   - optional bracketing: if a sign-change is observed, keep the root bracketed
+        #     and fall back to regula-falsi / bisection when the Newton proposal is unsafe.
+        solver_mode = str(cfg.solver.mtom_solver).strip().lower()
+        use_newton = solver_mode not in {"fixed_point", "legacy", "picard"}
+
+        prev_mtom: Optional[float] = None
+        prev_res: Optional[float] = None
+
+        # Bracketing points for residual sign (if encountered)
+        pos_pt: Optional[Tuple[float, float]] = None  # (mtom, residual) with residual > 0
+        neg_pt: Optional[Tuple[float, float]] = None  # (mtom, residual) with residual < 0
+
+        relax = float(cfg.solver.newton_relax_init)
+
+        def _clamp_step(m_current: float, m_proposed: float) -> float:
+            """Clamp MTOM proposal to keep the outer loop robust."""
+
+            m_next = float(m_proposed)
+
+            if not math.isfinite(m_next):
+                return float(m_current)
+
+            # Enforce positivity
+            if m_next <= 0.0:
+                m_next = max(1.0, 0.1 * m_current)
+
+            # Trust region: limit relative step size
+            max_rel = float(cfg.solver.newton_max_rel_step)
+            if max_rel > 0.0:
+                max_abs = max_rel * max(m_current, 1.0)
+                dm = m_next - m_current
+                if abs(dm) > max_abs:
+                    m_next = m_current + math.copysign(max_abs, dm)
+
+            return float(m_next)
+
         for outer_iter in range(1, cfg.solver.max_outer_iter + 1):
             logger.info("======================================================")
             logger.info(f"======================= ITER {outer_iter} =======================")
+
+            # NOTE: For MTOM closure we only need the phases that drive the mass model
+            #       (climb for sizing, cruise for cruise-governing compressor mass).
+            #       takeoff / cruise_charger are computed once after MTOM converges.
 
             # Cruise (FC only -> psi = 0)
             phases["cruise"] = self._phase_solver.solve(
@@ -1658,32 +1740,6 @@ class HybridFuelCellAircraftDesign:
                 oversizing=cfg.fuel_cell_op.oversizing,
             )
             ptotal_guess["cruise"] = phases["cruise"].p_total_w
-
-            # Cruise charger (psi < 0)
-            phases["cruise_charger"] = self._phase_solver.solve(
-                name="cruise_charger",
-                mtom_kg=mtom,
-                p_w_kw_per_kg=cfg.p_w.p_w_cruise_kw_per_kg,
-                flight_point=FlightPoint(cfg.flight.h_cr_m, cfg.flight.mach_cr),
-                psi=cfg.hybrid.psi_cruise_charger,
-                beta=self._beta_cruise_charger,
-                initial_total_power_w=ptotal_guess["cruise_charger"],
-                oversizing=cfg.fuel_cell_op.oversizing,
-            )
-            ptotal_guess["cruise_charger"] = phases["cruise_charger"].p_total_w
-
-            # Takeoff
-            phases["takeoff"] = self._phase_solver.solve(
-                name="takeoff",
-                mtom_kg=mtom,
-                p_w_kw_per_kg=cfg.p_w.p_w_takeoff_kw_per_kg,
-                flight_point=FlightPoint(cfg.flight.h_takeoff_m, cfg.flight.mach_takeoff),
-                psi=cfg.hybrid.psi_takeoff,
-                beta=1.05,
-                initial_total_power_w=ptotal_guess["takeoff"],
-                oversizing=cfg.fuel_cell_op.oversizing,
-            )
-            ptotal_guess["takeoff"] = phases["takeoff"].p_total_w
 
             # Climb
             phases["climb"] = self._phase_solver.solve(
@@ -1704,14 +1760,146 @@ class HybridFuelCellAircraftDesign:
                 cruise=phases["cruise"],
             )
 
-            logger.info("\n-----------------------")
-            logger.info(f"ptotal_climb: {phases['climb'].p_total_w/1000:,.0f} kW, mtom: {mass.mtom_kg:,.0f} kg\n\n")
+            residual = float(mass.mtom_kg - mtom)
 
-            if abs(mass.mtom_kg - mtom) <= cfg.solver.mtom_tol_kg:
+            logger.info("\n-----------------------")
+            logger.info(
+                f"ptotal_climb: {phases['climb'].p_total_w/1000:,.0f} kW, "
+                f"mtom_est: {mass.mtom_kg:,.0f} kg, mtom: {mtom:,.0f} kg, "
+                f"residual: {residual:+,.2f} kg\n"
+            )
+
+            if abs(residual) <= cfg.solver.mtom_tol_kg:
+                # Compute remaining phases at the converged MTOM (for reporting/exports)
+                phases["cruise_charger"] = self._phase_solver.solve(
+                    name="cruise_charger",
+                    mtom_kg=mtom,
+                    p_w_kw_per_kg=cfg.p_w.p_w_cruise_kw_per_kg,
+                    flight_point=FlightPoint(cfg.flight.h_cr_m, cfg.flight.mach_cr),
+                    psi=cfg.hybrid.psi_cruise_charger,
+                    beta=self._beta_cruise_charger,
+                    initial_total_power_w=ptotal_guess["cruise_charger"],
+                    oversizing=cfg.fuel_cell_op.oversizing,
+                )
+                ptotal_guess["cruise_charger"] = phases["cruise_charger"].p_total_w
+
+                phases["takeoff"] = self._phase_solver.solve(
+                    name="takeoff",
+                    mtom_kg=mtom,
+                    p_w_kw_per_kg=cfg.p_w.p_w_takeoff_kw_per_kg,
+                    flight_point=FlightPoint(cfg.flight.h_takeoff_m, cfg.flight.mach_takeoff),
+                    psi=cfg.hybrid.psi_takeoff,
+                    beta=1.05,
+                    initial_total_power_w=ptotal_guess["takeoff"],
+                    oversizing=cfg.fuel_cell_op.oversizing,
+                )
+                ptotal_guess["takeoff"] = phases["takeoff"].p_total_w
+
                 logger.info("\nCONVERGED")
                 return phases, mass
 
-            mtom = float(mass.mtom_kg)
+            # -----------------
+            # MTOM update
+            # -----------------
+            mtom_next: float
+            step_note = "fixed_point"
+
+            if not use_newton:
+                # Legacy behaviour: pure fixed-point update
+                mtom_next = _clamp_step(mtom, float(mass.mtom_kg))
+            else:
+                # Adapt damping based on progress from previous iteration
+                if prev_res is not None and math.isfinite(prev_res):
+                    if abs(residual) < abs(prev_res):
+                        relax = min(1.0, relax * float(cfg.solver.newton_relax_increase))
+                    else:
+                        relax = max(float(cfg.solver.newton_relax_min), relax * float(cfg.solver.newton_relax_decrease))
+
+                # Update bracket points (optional)
+                if bool(cfg.solver.newton_use_bracketing) and math.isfinite(residual):
+                    # Keep one point on each side of the root (if available). When both signs exist,
+                    # prefer updates that tighten the MTOM bracket (smaller interval).
+                    if residual > 0.0:
+                        if pos_pt is None:
+                            pos_pt = (mtom, residual)
+                        elif neg_pt is None:
+                            # No opposite sign yet; keep the most recent positive point
+                            pos_pt = (mtom, residual)
+                        else:
+                            if abs(mtom - neg_pt[0]) < abs(pos_pt[0] - neg_pt[0]):
+                                pos_pt = (mtom, residual)
+                    elif residual < 0.0:
+                        if neg_pt is None:
+                            neg_pt = (mtom, residual)
+                        elif pos_pt is None:
+                            # No opposite sign yet; keep the most recent negative point
+                            neg_pt = (mtom, residual)
+                        else:
+                            if abs(mtom - pos_pt[0]) < abs(neg_pt[0] - pos_pt[0]):
+                                neg_pt = (mtom, residual)
+
+                mtom_prop: Optional[float] = None
+
+                # Newton step with secant slope (1 evaluation/iter after the first)
+                if prev_mtom is not None and prev_res is not None:
+                    dm = mtom - prev_mtom
+                    dr = residual - prev_res
+                    if dm != 0.0 and dr != 0.0:
+                        slope = dr / dm  # ≈ d(residual)/d(mtom)
+                        if math.isfinite(slope) and abs(slope) > float(cfg.solver.newton_slope_eps):
+                            mtom_newton = mtom - residual / slope
+                            mtom_prop = mtom + relax * (mtom_newton - mtom)
+                            step_note = "newton"
+
+                # If bracketed, ensure the proposal stays inside (fall back if needed)
+                if bool(cfg.solver.newton_use_bracketing) and (pos_pt is not None) and (neg_pt is not None):
+                    x_pos, f_pos = pos_pt
+                    x_neg, f_neg = neg_pt
+                    lo = min(x_pos, x_neg)
+                    hi = max(x_pos, x_neg)
+
+                    def _in_bracket(x: float) -> bool:
+                        return math.isfinite(x) and (lo <= x <= hi)
+
+                    if (mtom_prop is None) or (not _in_bracket(float(mtom_prop))):
+                        # Regula falsi (secant across bracket endpoints): always inside the bracket
+                        if f_pos != f_neg:
+                            mtom_rf = x_pos - f_pos * (x_neg - x_pos) / (f_neg - f_pos)
+                        else:
+                            mtom_rf = 0.5 * (lo + hi)
+
+                        if _in_bracket(float(mtom_rf)):
+                            mtom_prop = float(mtom_rf)
+                            step_note = "regula_falsi"
+                        else:
+                            mtom_prop = 0.5 * (lo + hi)
+                            step_note = "bisection"
+
+                # Fallback: relaxed fixed-point step (still 1 eval/iter)
+                if mtom_prop is None or (not math.isfinite(float(mtom_prop))):
+                    mtom_prop = mtom + float(cfg.solver.newton_fp_relax) * residual
+                    step_note = "fixed_point_fallback"
+
+                mtom_next = _clamp_step(mtom, float(mtom_prop))
+
+                # Prevent stalling when far from the tolerance
+                if abs(mtom_next - mtom) < float(cfg.solver.newton_min_step_kg) and abs(residual) > cfg.solver.mtom_tol_kg:
+                    mtom_next = _clamp_step(mtom, mtom + math.copysign(float(cfg.solver.newton_min_step_kg), residual))
+
+                # Keep inside bracket after clamping (if we have one)
+                if bool(cfg.solver.newton_use_bracketing) and (pos_pt is not None) and (neg_pt is not None):
+                    lo = min(pos_pt[0], neg_pt[0])
+                    hi = max(pos_pt[0], neg_pt[0])
+                    if mtom_next < lo or mtom_next > hi:
+                        mtom_next = _clamp_step(mtom, 0.5 * (lo + hi))
+                        step_note = "bisection(clamped)"
+
+                logger.info(
+                    f"MTOM update: {step_note}, relax={relax:.3f} -> mtom_next={mtom_next:,.2f} kg\n"
+                )
+
+            prev_mtom, prev_res = mtom, residual
+            mtom = float(mtom_next)
 
         raise RuntimeError(f"MTOM did not converge within {cfg.solver.max_outer_iter} outer iterations")
 
