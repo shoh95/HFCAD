@@ -1,0 +1,35 @@
+Traceback (most recent call last):
+  File "/home/shoh95/Programming/HFCAD/app/main.py", line 25, in <module>
+    import pandas as pd
+  File "/home/shoh95/anaconda3/envs/aerofc/lib/python3.12/site-packages/pandas/__init__.py", line 49, in <module>
+    from pandas.core.api import (
+  File "/home/shoh95/anaconda3/envs/aerofc/lib/python3.12/site-packages/pandas/core/api.py", line 28, in <module>
+    from pandas.core.arrays import Categorical
+  File "/home/shoh95/anaconda3/envs/aerofc/lib/python3.12/site-packages/pandas/core/arrays/__init__.py", line 1, in <module>
+    from pandas.core.arrays.arrow import ArrowExtensionArray
+  File "/home/shoh95/anaconda3/envs/aerofc/lib/python3.12/site-packages/pandas/core/arrays/arrow/__init__.py", line 1, in <module>
+    from pandas.core.arrays.arrow.accessors import (
+  File "/home/shoh95/anaconda3/envs/aerofc/lib/python3.12/site-packages/pandas/core/arrays/arrow/accessors.py", line 23, in <module>
+    import pyarrow.compute as pc
+  File "/home/shoh95/anaconda3/envs/aerofc/lib/python3.12/site-packages/pyarrow/compute.py", line 341, in <module>
+    _make_global_functions()
+  File "/home/shoh95/anaconda3/envs/aerofc/lib/python3.12/site-packages/pyarrow/compute.py", line 338, in _make_global_functions
+    g[cpp_name] = g[name] = _wrap_function(name, func)
+                            ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/shoh95/anaconda3/envs/aerofc/lib/python3.12/site-packages/pyarrow/compute.py", line 309, in _wrap_function
+    return _decorate_compute_function(wrapper, name, func, options_class)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/shoh95/anaconda3/envs/aerofc/lib/python3.12/site-packages/pyarrow/compute.py", line 175, in _decorate_compute_function
+    options_class_doc = _scrape_options_class_doc(options_class)
+                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/shoh95/anaconda3/envs/aerofc/lib/python3.12/site-packages/pyarrow/compute.py", line 123, in _scrape_options_class_doc
+    doc = docscrape.NumpyDocString(options_class.__doc__)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/shoh95/anaconda3/envs/aerofc/lib/python3.12/site-packages/pyarrow/vendored/docscrape.py", line 148, in __init__
+    docstring = textwrap.dedent(docstring).split('\n')
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+KeyboardInterrupt
+
+[run_sweep] FAIL criteria: artifact not found or empty
+[run_sweep] expected artifact: results/input_sweep_r1/h5000_M0.35_R2000km_PL1000kg/ConvergedData.txt
+[run_sweep] exit code: 130

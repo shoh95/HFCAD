@@ -1,0 +1,64 @@
+======================================================
+======================= ITER 1 =======================
+Reynolds_number: 9,133,562
+Stack prop output power: 432 kW, Pcomp: 40.6 kW
+Cell efficiency: 0.296, Output efficiency: 0.257
+mdot_h2: 11.32 g/s
+Reynolds_number: 9,133,562
+Stack prop output power: 432 kW, Pcomp: 40.6 kW
+Cell efficiency: 0.296, Output efficiency: 0.257
+mdot_h2: 11.32 g/s
+Reynolds_number: 9,133,562
+Stack prop output power: 432 kW, Pcomp: 40.6 kW
+Cell efficiency: 0.296, Output efficiency: 0.257
+mdot_h2: 11.32 g/s
+Reynolds_number: 9,133,562
+Stack prop output power: 432 kW, Pcomp: 40.6 kW
+Cell efficiency: 0.296, Output efficiency: 0.257
+mdot_h2: 11.32 g/s
+Reynolds_number: 6,709,346
+Stack prop output power: 322 kW, Pcomp: 2.8 kW
+Cell efficiency: 0.305, Output efficiency: 0.287
+mdot_h2: 7.55 g/s
+Reynolds_number: 6,709,346
+Stack prop output power: 322 kW, Pcomp: 2.8 kW
+Cell efficiency: 0.305, Output efficiency: 0.287
+mdot_h2: 7.55 g/s
+Reynolds_number: 9,133,562
+Traceback (most recent call last):
+  File "/home/shoh95/Programming/HFCAD/app/main.py", line 2481, in <module>
+    main()
+  File "/home/shoh95/Programming/HFCAD/app/main.py", line 2455, in main
+    cfg_used, phases, mass, _trade_df = runner.run(out_dir=out_dir)
+                                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/shoh95/Programming/HFCAD/app/main.py", line 1957, in run
+    return self._run_min_mtom(out_dir=out_dir)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/shoh95/Programming/HFCAD/app/main.py", line 2057, in _run_min_mtom
+    phases_i, mass_i = design.run(initial_mtom_kg=mtom_seed, initial_total_power_guess_w=p_seed)
+                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/shoh95/Programming/HFCAD/app/main.py", line 1689, in run
+    phases["climb"] = self._phase_solver.solve(
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/shoh95/Programming/HFCAD/app/main.py", line 1234, in solve
+    nacelle = self._fc.size_nacelle(
+              ^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/shoh95/Programming/HFCAD/app/main.py", line 1112, in size_nacelle
+    float(compressor_mass_model(geom_comp, power_comp, stl_path=self._comp_stl_path))
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/shoh95/Programming/HFCAD/app/models/compressor_mass.py", line 56, in compressor_mass_model
+    cas_ao_c = cas_ao.cut(out)
+               ^^^^^^^^^^^^^^^
+  File "/home/shoh95/anaconda3/envs/aerofc/lib/python3.12/site-packages/cadquery/cq.py", line 3466, in cut
+    newS = solidRef.cut(*solidToCut, tol=tol)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/shoh95/anaconda3/envs/aerofc/lib/python3.12/site-packages/cadquery/occ_impl/shapes.py", line 4714, in cut
+    return tcast(Compound, self._bool_op(self, toCut, cut_op))
+                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/shoh95/anaconda3/envs/aerofc/lib/python3.12/site-packages/cadquery/occ_impl/shapes.py", line 1295, in _bool_op
+    op.Build()
+KeyboardInterrupt
+
+[run_sweep] FAIL criteria: artifact not found or empty
+[run_sweep] expected artifact: results/input_sweep_r1/h5000_M0.35_R1000km_PL1000kg/ConvergedData.txt
+[run_sweep] exit code: 130
