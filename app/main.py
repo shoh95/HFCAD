@@ -282,6 +282,19 @@ class SolverConfig:
     # Bracketing: when a sign change in the residual is detected, keep the root bracketed
     # and fall back to bisection/regula-falsi if the Newton proposal is unsafe.
     newton_use_bracketing: bool = True
+    # If bracketing is enabled but a sign-changing bracket is not found for many iterations,
+    # allow guarded Newton/secant anyway (still requiring slope <= 0 and standard safeguards).
+    newton_prebracket_allow_after_iters: int = 8
+    # Initial MTOM guess policy: perform a few directed probes around the initial guess
+    # to obtain a sign-changing bracket earlier (faster Newton/regula-falsi activation).
+    initial_bracket_probe_enable: bool = True
+    initial_bracket_probe_iters: int = 2
+    initial_bracket_probe_rel_span: float = 0.08
+    initial_bracket_probe_min_span_kg: float = 150.0
+    # Bracket-stall guard: if bracketed bisection becomes numerically stuck, drop the
+    # bracket and take one fixed-point step to escape local cycling/noise.
+    bracket_stall_reset_iters: int = 4
+    bracket_min_span_kg: float = 0.5
 
     # Infeasibility guard: stop early if residual stays on one side and does not improve
     # enough despite moving MTOM in the expected direction.
@@ -1702,6 +1715,11 @@ class HybridFuelCellAircraftDesign:
         pos_pt: Optional[Tuple[float, float]] = None  # (mtom, residual) with residual > 0
         neg_pt: Optional[Tuple[float, float]] = None  # (mtom, residual) with residual < 0
         pos_residual_streak: List[Tuple[float, float]] = []  # recent (mtom, residual) for residual > 0
+        prebracket_iter_count = 0
+        bracket_stall_count = 0
+        initial_probe_base_mtom = float(mtom)
+        initial_probe_dir: Optional[float] = None
+        initial_probe_attempts = 0
 
         relax = float(cfg.solver.newton_relax_init)
 
@@ -1873,27 +1891,62 @@ class HybridFuelCellAircraftDesign:
 
                 mtom_prop: Optional[float] = None
                 bracketed = (pos_pt is not None) and (neg_pt is not None)
+                prebracket_newton_gate = max(0, int(cfg.solver.newton_prebracket_allow_after_iters))
+
+                if bool(cfg.solver.newton_use_bracketing) and (not bracketed):
+                    prebracket_iter_count += 1
+                else:
+                    prebracket_iter_count = 0
+
+                did_initial_probe = False
+                # Initial directed probe around the starting MTOM guess to trigger earlier sign change.
+                if (
+                    bool(cfg.solver.newton_use_bracketing)
+                    and bool(cfg.solver.initial_bracket_probe_enable)
+                    and (not bracketed)
+                    and (initial_probe_attempts < max(0, int(cfg.solver.initial_bracket_probe_iters)))
+                ):
+                    if math.isfinite(residual) and residual != 0.0:
+                        if initial_probe_dir is None:
+                            initial_probe_dir = 1.0 if residual > 0.0 else -1.0
+                        span0 = max(
+                            float(cfg.solver.initial_bracket_probe_min_span_kg),
+                            float(cfg.solver.initial_bracket_probe_rel_span) * max(initial_probe_base_mtom, 1.0),
+                        )
+                        span = span0 * (2.0 ** initial_probe_attempts)
+                        mtom_prop = float(initial_probe_base_mtom + initial_probe_dir * span)
+                        step_note = f"initial_bracket_probe_{initial_probe_attempts + 1}"
+                        initial_probe_attempts += 1
+                        did_initial_probe = True
 
                 # If configured, Newton is disabled before the first sign-changing bracket exists.
-                if bool(cfg.solver.newton_use_bracketing) and (not bracketed):
-                    mtom_prop = mtom + float(cfg.solver.newton_fp_relax) * residual
-                    step_note = "fixed_point_prebracket"
-                else:
-                    # Newton step with secant slope (1 evaluation/iter after the first)
-                    if prev_mtom is not None and prev_res is not None:
-                        dm = mtom - prev_mtom
-                        dr = residual - prev_res
-                        if dm != 0.0 and dr != 0.0:
-                            slope = dr / dm  # ≈ d(residual)/d(mtom)
-                            if math.isfinite(slope) and abs(slope) > float(cfg.solver.newton_slope_eps):
-                                if slope <= 0.0:
-                                    mtom_newton = mtom - residual / slope
-                                    mtom_prop = mtom + relax * (mtom_newton - mtom)
-                                    step_note = "newton"
-                                else:
-                                    # Positive slope is unsafe for this residual convention.
-                                    mtom_prop = None
-                                    step_note = "newton_reject_slope_pos"
+                if not did_initial_probe:
+                    if (
+                        bool(cfg.solver.newton_use_bracketing)
+                        and (not bracketed)
+                        and (prebracket_iter_count <= prebracket_newton_gate)
+                    ):
+                        mtom_prop = mtom + float(cfg.solver.newton_fp_relax) * residual
+                        step_note = "fixed_point_prebracket"
+                    else:
+                        # Newton step with secant slope (1 evaluation/iter after the first)
+                        if prev_mtom is not None and prev_res is not None:
+                            dm = mtom - prev_mtom
+                            dr = residual - prev_res
+                            if dm != 0.0 and dr != 0.0:
+                                slope = dr / dm  # ≈ d(residual)/d(mtom)
+                                if math.isfinite(slope) and abs(slope) > float(cfg.solver.newton_slope_eps):
+                                    if slope <= 0.0:
+                                        mtom_newton = mtom - residual / slope
+                                        mtom_prop = mtom + relax * (mtom_newton - mtom)
+                                        if bool(cfg.solver.newton_use_bracketing) and (not bracketed):
+                                            step_note = "newton_prebracket"
+                                        else:
+                                            step_note = "newton"
+                                    else:
+                                        # Positive slope is unsafe for this residual convention.
+                                        mtom_prop = None
+                                        step_note = "newton_reject_slope_pos"
 
                 # If bracketed, ensure the proposal stays inside (fall back if needed)
                 if bool(cfg.solver.newton_use_bracketing) and bracketed:
@@ -1937,6 +1990,26 @@ class HybridFuelCellAircraftDesign:
                     if mtom_next < lo or mtom_next > hi:
                         mtom_next = _clamp_step(mtom, 0.5 * (lo + hi))
                         step_note = "bisection(clamped)"
+
+                    # Guard against bracket collapse / oscillatory residual noise:
+                    # repeated bisection with tiny/no MTOM movement can deadlock progress.
+                    tiny_step = abs(mtom_next - mtom) < float(cfg.solver.newton_min_step_kg)
+                    tight_bracket = (hi - lo) < float(cfg.solver.bracket_min_span_kg)
+                    bisect_like = step_note in {"bisection", "bisection(clamped)"}
+                    if bisect_like and tiny_step and tight_bracket and abs(residual) > cfg.solver.mtom_tol_kg:
+                        bracket_stall_count += 1
+                    else:
+                        bracket_stall_count = 0
+
+                    if bracket_stall_count >= max(1, int(cfg.solver.bracket_stall_reset_iters)):
+                        pos_pt = None
+                        neg_pt = None
+                        prebracket_iter_count = 0
+                        bracket_stall_count = 0
+                        mtom_next = _clamp_step(mtom, mtom + float(cfg.solver.newton_fp_relax) * residual)
+                        step_note = "bracket_reset_fixed_point"
+                else:
+                    bracket_stall_count = 0
 
                 logger.info(
                     f"MTOM update: {step_note}, relax={relax:.3f} -> mtom_next={mtom_next:,.2f} kg\n"
