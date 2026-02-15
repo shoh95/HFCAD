@@ -1,6 +1,25 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# ===== Cleanup on interrupt/termination =====
+cleanup() {
+  echo "[run_sweep] Caught signal, terminating child processes..." >&2
+  # Kill entire process group if possible
+  if command -v pkill >/dev/null 2>&1; then
+    pkill -P $$ 2>/dev/null || true
+    pkill -f "python .*app/main.py" 2>/dev/null || true
+    pkill -f "chrome|chromium|kaleido" 2>/dev/null || true
+  fi
+  # Hard kill leftover python/chrome if still alive
+  if command -v pkill >/dev/null 2>&1; then
+    pkill -9 -P $$ 2>/dev/null || true
+    pkill -9 -f "python .*app/main.py" 2>/dev/null || true
+    pkill -9 -f "chrome|chromium|kaleido" 2>/dev/null || true
+  fi
+}
+trap cleanup INT TERM
+# ===========================================
+
 # =========================
 # Defaults (override via flags/env)
 # =========================
@@ -22,6 +41,10 @@ OK_LIST="${OK_LIST:-${RUN_DIR}/ok.list}"
 FAIL_LIST="${FAIL_LIST:-${RUN_DIR}/fail.list}"
 SUMMARY_TXT="${SUMMARY_TXT:-${RUN_DIR}/summary.txt}"
 
+# ETA monitor
+ETA="${ETA:-1}"                    # 1=enable, 0=disable
+ETA_INTERVAL_SEC="${ETA_INTERVAL_SEC:-30}"  # refresh interval (seconds)
+
 # =========================
 # Helpers
 # =========================
@@ -37,11 +60,17 @@ Options:
   --python PATH         Python executable (default: ${PYTHON_BIN})
   --main PATH           main.py path (default: ${MAIN_PY})
   --timeout SEC         Per-case timeout seconds (0 = disabled, default: ${TIMEOUT_SEC})
-  --resume              Only run cases NOT in ok.list from the latest run directory
+  --resume              Only run cases NOT in ok.list from the latest run directory under <out-dir>/_logs
+  --resume-from-out DIR  Resume using latest run under DIR/_logs (DIR is a previous --out-dir)
+  --resume-run-dir DIR   Resume using this explicit run directory (e.g., .../_logs/run-YYYYMMDD-HHMMSS)
+  --resume-ok-list FILE  Resume using this explicit ok.list path
+                         Precedence: --resume-ok-list > --resume-run-dir > --resume-from-out > --out-dir
+  --eta 0|1             Print live progress + ETA (default: ${ETA})
+  --eta-interval SEC    ETA refresh interval seconds (default: ${ETA_INTERVAL_SEC})
   -h, --help            Show this help
 
 Env overrides:
-  PYTHON_BIN, MAIN_PY, IN_DIR, OUT_DIR, MODE, JOBS, TIMEOUT_SEC, LOG_ROOT
+  PYTHON_BIN, MAIN_PY, IN_DIR, OUT_DIR, MODE, JOBS, TIMEOUT_SEC, LOG_ROOT, ETA, ETA_INTERVAL_SEC
 EOF
 }
 
@@ -49,6 +78,65 @@ die() { echo "ERROR: $*" >&2; exit 1; }
 
 has_cmd() { command -v "$1" >/dev/null 2>&1; }
 
+format_hms() {
+  # args: seconds (int)
+  local t="${1:-0}"
+  local h=$(( t / 3600 ))
+  local m=$(( (t % 3600) / 60 ))
+  local s=$(( t % 60 ))
+  printf "%02d:%02d:%02d" "$h" "$m" "$s"
+}
+
+eta_monitor() {
+  # args: total_cases start_ts
+  local total="$1"
+  local start_ts="$2"
+  local last_done=-1
+
+  while true; do
+    # counts (files always exist but guard anyway)
+    local ok=0 fail=0 done=0
+    [[ -f "$OK_LIST" ]] && ok="$(wc -l < "$OK_LIST" | tr -d ' ')"
+    [[ -f "$FAIL_LIST" ]] && fail="$(wc -l < "$FAIL_LIST" | tr -d ' ')"
+    done=$(( ok + fail ))
+
+    local now elapsed rate rem eta_sec eta_hms el_hms fin_ts fin_str
+    now="$(date +%s)"
+    elapsed=$(( now - start_ts ))
+    rem=$(( total - done ))
+
+    # Only print if progress changed or every interval (simpler: always print)
+    if [[ "$elapsed" -gt 0 && "$done" -gt 0 ]]; then
+      # rate: cases per second (floating via awk)
+      rate="$(awk -v d="$done" -v e="$elapsed" 'BEGIN{printf "%.6f", d/e}')"
+      eta_sec="$(awk -v r="$rate" -v rem="$rem" 'BEGIN{ if (r<=0) print -1; else printf "%d", rem/r }')"
+    else
+      rate="0"
+      eta_sec="-1"
+    fi
+
+    el_hms="$(format_hms "$elapsed")"
+    if [[ "$eta_sec" -ge 0 ]]; then
+      eta_hms="$(format_hms "$eta_sec")"
+      fin_ts=$(( now + eta_sec ))
+      fin_str="$(date -d "@$fin_ts" "+%Y-%m-%d %H:%M:%S" 2>/dev/null || date "+%Y-%m-%d %H:%M:%S")"
+    else
+      eta_hms="--:--:--"
+      fin_str="N/A"
+    fi
+
+    # Progress line (stderr). Use carriage return for in-place update.
+    printf "\r[ETA] done %d/%d (OK %d, FAIL %d) | elapsed %s | ETA %s | finish %s" \
+      "$done" "$total" "$ok" "$fail" "$el_hms" "$eta_hms" "$fin_str" >&2
+
+    if [[ "$done" -ge "$total" ]]; then
+      echo >&2
+      break
+    fi
+
+    sleep "$ETA_INTERVAL_SEC"
+  done
+}
 # Per-case runner: expects one argument = ini path
 run_one() {
   local f="$1"
@@ -62,24 +150,44 @@ run_one() {
 
   mkdir -p "${OUT_DIR}" "${RUN_DIR}"
 
+
   # Run the command (capture rc but decide success by artifact)
   set +e
+
+  # Force single-threaded numerics inside each worker (avoid oversubscription)
+  local -a PYENV=(
+    OPENBLAS_NUM_THREADS=1
+    OMP_NUM_THREADS=1
+    OMP_DYNAMIC=FALSE
+    OMP_MAX_ACTIVE_LEVELS=1
+    MKL_NUM_THREADS=1
+    MKL_DYNAMIC=FALSE
+    NUMEXPR_NUM_THREADS=1
+    VECLIB_MAXIMUM_THREADS=1
+    BLIS_NUM_THREADS=1
+  )
+
   if [[ "$TIMEOUT_SEC" -gt 0 ]]; then
     has_cmd timeout || die "timeout not found but --timeout was set."
     timeout --preserve-status "${TIMEOUT_SEC}" \
+      env "${PYENV[@]}" \
       "${PYTHON_BIN}" "${MAIN_PY}" -i "${f}" --outdir "${OUT_DIR}" >"${log}" 2>&1
   else
-    "${PYTHON_BIN}" "${MAIN_PY}" -i "${f}" --outdir "${OUT_DIR}" >"${log}" 2>&1
+    env "${PYENV[@]}" \
+      "${PYTHON_BIN}" "${MAIN_PY}" -i "${f}" --outdir "${OUT_DIR}" >"${log}" 2>&1
   fi
+
   rc=$?
   set -e
 
+
+
   # Success criterion: artifact existence (non-empty recommended)
   if [[ -s "${artifact}" ]]; then
-    echo "${f}" >> "${OK_LIST}"
+    echo "$(basename "$f")" >> "${OK_LIST}"
     return 0
   else
-    echo "${f}" >> "${FAIL_LIST}"
+    echo "$(basename "$f")" >> "${FAIL_LIST}"
     {
       echo
       echo "[run_sweep] FAIL criteria: artifact not found or empty"
@@ -95,6 +203,9 @@ run_one() {
 # Parse args
 # =========================
 RESUME=0
+RESUME_FROM_OUT=""
+RESUME_RUN_DIR=""
+RESUME_OK_LIST=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --mode) MODE="$2"; shift 2;;
@@ -105,48 +216,79 @@ while [[ $# -gt 0 ]]; do
     --main) MAIN_PY="$2"; shift 2;;
     --timeout) TIMEOUT_SEC="$2"; shift 2;;
     --resume) RESUME=1; shift 1;;
+    --resume-from-out) RESUME=1; RESUME_FROM_OUT="$2"; shift 2;;
+    --resume-run-dir) RESUME=1; RESUME_RUN_DIR="$2"; shift 2;;
+    --resume-ok-list) RESUME=1; RESUME_OK_LIST="$2"; shift 2;;
     -h|--help) usage; exit 0;;
     *) die "Unknown option: $1";;
   esac
 done
 
+LOG_ROOT="${OUT_DIR}/_logs"
+
+
 [[ -f "$MAIN_PY" ]] || die "main.py not found: $MAIN_PY"
 [[ -d "$IN_DIR" ]] || die "input dir not found: $IN_DIR"
-mkdir -p "$OUT_DIR" "$RUN_DIR"
-: > "$OK_LIST"
-: > "$FAIL_LIST"
+mkdir -p "$OUT_DIR"
+
+if [[ $RESUME -eq 0 ]]; then
+  mkdir -p "$RUN_DIR"
+  : > "$OK_LIST"
+  : > "$FAIL_LIST"
+fi
+
 
 # Collect inputs (stable order)
 shopt -s nullglob
 mapfile -t inputs < <(ls -1 "${IN_DIR}"/*.ini 2>/dev/null || true)
 [[ ${#inputs[@]} -gt 0 ]] || die "No .ini files found in: $IN_DIR"
 
-# Resume logic (optional): skip already OK from latest run
+# Resume logic (optional): skip already OK from latest run (flexible sources)
 if [[ $RESUME -eq 1 ]]; then
-  # Find latest run directory under LOG_ROOT
-  latest="$(ls -1dt "${LOG_ROOT}"/run-* 2>/dev/null | head -n 1 || true)"
-  [[ -n "${latest:-}" ]] || die "--resume requested but no previous run-* directory found under ${LOG_ROOT}"
-  ok_prev="${latest}/ok.list"
-  [[ -f "$ok_prev" ]] || die "Previous ok.list not found: $ok_prev"
 
-  # Build skip set
+  # ----- Determine reference ok.list only -----
+  if [[ -n "${RESUME_OK_LIST}" ]]; then
+      RESUME_OK_REF="${RESUME_OK_LIST}"
+  elif [[ -n "${RESUME_RUN_DIR}" ]]; then
+      RESUME_OK_REF="${RESUME_RUN_DIR}/ok.list"
+  else
+      RESUME_LOG_ROOT="${LOG_ROOT}"
+      if [[ -n "${RESUME_FROM_OUT}" ]]; then
+          RESUME_LOG_ROOT="${RESUME_FROM_OUT}/_logs"
+      fi
+      latest="$(ls -1dt "${RESUME_LOG_ROOT}"/run-* 2>/dev/null | head -n 1 || true)"
+      [[ -n "${latest:-}" ]] || die "--resume requested but no previous run-* found"
+      RESUME_OK_REF="${latest}/ok.list"
+  fi
+
+  [[ -f "$RESUME_OK_REF" ]] || die "Previous ok.list not found: $RESUME_OK_REF"
+
+  # ----- Always create NEW run directory -----
+  mkdir -p "$RUN_DIR"
+  : > "$OK_LIST"
+  : > "$FAIL_LIST"
+
   declare -A okset
   while IFS= read -r line; do
-    okset["$line"]=1
-  done < "$ok_prev"
+      b="$(basename "$line")"
+      okset["$b"]=1
+  done < "$RESUME_OK_REF"
 
-  # Filter inputs
   filtered=()
   for f in "${inputs[@]}"; do
-    if [[ -z "${okset[$f]+x}" ]]; then
-      filtered+=("$f")
-    fi
+      b="$(basename "$f")"
+      if [[ -z "${okset[$b]+x}" ]]; then
+          filtered+=("$f")
+      fi
   done
+
   inputs=("${filtered[@]}")
-  echo "[RESUME] Skipping cases already OK in: $ok_prev"
+  echo "[RESUME] Reference OK list: $RESUME_OK_REF"
   echo "[RESUME] Remaining cases: ${#inputs[@]}"
-  [[ ${#inputs[@]} -gt 0 ]] || { echo "Nothing to run. Exiting."; exit 0; }
+  [[ ${#inputs[@]} -gt 0 ]] || { echo "Nothing to run."; exit 0; }
+
 fi
+
 
 echo "MODE      : $MODE"
 echo "JOBS      : $JOBS"
@@ -160,6 +302,16 @@ echo "N_CASES   : ${#inputs[@]}"
 echo
 
 start_ts="$(date +%s)"
+
+# Start ETA monitor (stderr)
+TOTAL_CASES="${#inputs[@]}"
+ETA_PID=""
+if [[ "${ETA}" == "1" ]]; then
+  eta_monitor "${TOTAL_CASES}" "${start_ts}" &
+  ETA_PID=$!
+  # Ensure monitor terminates on exit
+  trap '[[ -n "${ETA_PID}" ]] && kill "${ETA_PID}" 2>/dev/null || true' EXIT
+fi
 
 # =========================
 # Execute
@@ -175,18 +327,18 @@ if [[ "$MODE" == "seq" ]]; then
   done
 
 elif [[ "$MODE" == "par" ]]; then
-  has_cmd xargs || die "xargs not found."
+  has_cmd parallel || die "GNU parallel not found."
   # Export everything needed by subshell
   export PYTHON_BIN MAIN_PY IN_DIR OUT_DIR RUN_DIR OK_LIST FAIL_LIST TIMEOUT_SEC
   export -f run_one die has_cmd
 
+
   printf '%s\0' "${inputs[@]}" \
-    | xargs -0 -n 1 -P "$JOBS" bash -lc '
-        f="$1"
+    | parallel -0 -j "$JOBS" --linebuffer '
+        f={}
         echo "[RUN] $(basename "$f")"
         run_one "$f" && echo "  -> OK" || { echo "  -> FAIL (see log in '"$RUN_DIR"')" >&2; exit 0; }
-      ' _
-
+      '
 else
   die "Invalid MODE: $MODE (use seq|par)"
 fi
