@@ -1,0 +1,31 @@
+Traceback (most recent call last):
+  File "/home/shoh95/Programming/HFCAD/app/main.py", line 34, in <module>
+    from models.compressor_mass import compressor_mass_model
+  File "/home/shoh95/Programming/HFCAD/app/models/compressor_mass.py", line 1, in <module>
+    import cadquery as cq
+  File "/home/shoh95/anaconda3/envs/aerofc/lib/python3.12/site-packages/cadquery/__init__.py", line 11, in <module>
+    from .occ_impl.shapes import (
+  File "/home/shoh95/anaconda3/envs/aerofc/lib/python3.12/site-packages/cadquery/occ_impl/shapes.py", line 29, in <module>
+    from ..selectors import (
+  File "/home/shoh95/anaconda3/envs/aerofc/lib/python3.12/site-packages/cadquery/selectors.py", line 11, in <module>
+    from pyparsing import (
+  File "/home/shoh95/anaconda3/envs/aerofc/lib/python3.12/site-packages/pyparsing/__init__.py", line 151, in <module>
+    from .helpers import *
+  File "/home/shoh95/anaconda3/envs/aerofc/lib/python3.12/site-packages/pyparsing/helpers.py", line 738, in <module>
+    any_open_tag, any_close_tag = make_html_tags(
+                                  ^^^^^^^^^^^^^^^
+  File "/home/shoh95/anaconda3/envs/aerofc/lib/python3.12/site-packages/pyparsing/helpers.py", line 722, in make_html_tags
+    return _makeTags(tag_str, False)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/shoh95/anaconda3/envs/aerofc/lib/python3.12/site-packages/pyparsing/helpers.py", line 690, in _makeTags
+    openTag.tag_body = SkipTo(closeTag())
+                       ^^^^^^^^^^^^^^^^^^
+  File "/home/shoh95/anaconda3/envs/aerofc/lib/python3.12/site-packages/pyparsing/core.py", line 6049, in __init__
+    super().__init__(other)
+  File "/home/shoh95/anaconda3/envs/aerofc/lib/python3.12/site-packages/pyparsing/core.py", line 5145, in __init__
+    self.ignoreExprs.extend(expr.ignoreExprs)
+KeyboardInterrupt
+
+[run_sweep] FAIL criteria: artifact not found or empty
+[run_sweep] expected artifact: results/input_sweep_r1/h5000_M0.35_R1500km_PL350kg/ConvergedData.txt
+[run_sweep] exit code: 130

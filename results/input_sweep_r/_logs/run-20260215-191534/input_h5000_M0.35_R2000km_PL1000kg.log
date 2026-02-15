@@ -1,0 +1,48 @@
+Traceback (most recent call last):
+  File "/home/shoh95/Programming/HFCAD/app/main.py", line 27, in <module>
+    from ambiance import Atmosphere
+  File "/home/shoh95/anaconda3/envs/aerofc/lib/python3.12/site-packages/ambiance/__init__.py", line 1, in <module>
+    from .ambiance import *
+  File "/home/shoh95/anaconda3/envs/aerofc/lib/python3.12/site-packages/ambiance/ambiance.py", line 42, in <module>
+    import scipy.optimize as opt
+  File "/home/shoh95/anaconda3/envs/aerofc/lib/python3.12/site-packages/scipy/optimize/__init__.py", line 435, in <module>
+    from ._linprog import linprog, linprog_verbose_callback
+  File "/home/shoh95/anaconda3/envs/aerofc/lib/python3.12/site-packages/scipy/optimize/_linprog.py", line 22, in <module>
+    from ._linprog_ip import _linprog_ip
+  File "/home/shoh95/anaconda3/envs/aerofc/lib/python3.12/site-packages/scipy/optimize/_linprog_ip.py", line 27, in <module>
+    from ._linprog_util import _postsolve
+  File "/home/shoh95/anaconda3/envs/aerofc/lib/python3.12/site-packages/scipy/optimize/_linprog_util.py", line 9, in <module>
+    from scipy.optimize._remove_redundancy import (
+  File "/home/shoh95/anaconda3/envs/aerofc/lib/python3.12/site-packages/scipy/optimize/_remove_redundancy.py", line 9, in <module>
+    from scipy.linalg.interpolative import interp_decomp
+  File "/home/shoh95/anaconda3/envs/aerofc/lib/python3.12/site-packages/scipy/linalg/interpolative.py", line 360, in <module>
+    import scipy.linalg._decomp_interpolative as _backend
+  File "scipy/linalg/_decomp_interpolative.pyx", line 116, in init scipy.linalg._decomp_interpolative
+  File "/home/shoh95/anaconda3/envs/aerofc/lib/python3.12/site-packages/scipy/fft/__init__.py", line 91, in <module>
+    from ._fftlog import fht, ifht, fhtoffset
+  File "/home/shoh95/anaconda3/envs/aerofc/lib/python3.12/site-packages/scipy/fft/_fftlog.py", line 10, in <module>
+    from ._fftlog_backend import fhtoffset
+  File "/home/shoh95/anaconda3/envs/aerofc/lib/python3.12/site-packages/scipy/fft/_fftlog_backend.py", line 4, in <module>
+    from ..special import loggamma, poch
+  File "/home/shoh95/anaconda3/envs/aerofc/lib/python3.12/site-packages/scipy/special/__init__.py", line 793, in <module>
+    from ._support_alternative_backends import *
+  File "/home/shoh95/anaconda3/envs/aerofc/lib/python3.12/site-packages/scipy/special/_support_alternative_backends.py", line 871, in <module>
+    globals().update({nfo.func.__name__: nfo.wrapper for nfo in _special_funcs})
+                                         ^^^^^^^^^^^
+  File "/home/shoh95/anaconda3/envs/aerofc/lib/python3.12/site-packages/scipy/special/_support_alternative_backends.py", line 111, in wrapper
+    cap_func = capabilities(func)
+               ^^^^^^^^^^^^^^^^^^
+  File "/home/shoh95/anaconda3/envs/aerofc/lib/python3.12/site-packages/scipy/_lib/_array_api.py", line 847, in decorator
+    doc = str(doc).split("\n", 1)[1].lstrip(" \n")  # remove signature
+          ^^^^^^^^
+  File "/home/shoh95/anaconda3/envs/aerofc/lib/python3.12/site-packages/scipy/_lib/_docscrape.py", line 611, in __str__
+    out += super().__str__(func_role=self._role)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/shoh95/anaconda3/envs/aerofc/lib/python3.12/site-packages/scipy/_lib/_docscrape.py", line 564, in __str__
+    out += self._str_param_list(param_list)
+    ^^^
+KeyboardInterrupt
+
+[run_sweep] FAIL criteria: artifact not found or empty
+[run_sweep] expected artifact: results/input_sweep_r1/h5000_M0.35_R2000km_PL1000kg/ConvergedData.txt
+[run_sweep] exit code: 130

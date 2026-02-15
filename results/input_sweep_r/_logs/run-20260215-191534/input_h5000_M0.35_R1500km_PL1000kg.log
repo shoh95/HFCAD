@@ -1,0 +1,48 @@
+======================================================
+======================= ITER 1 =======================
+Reynolds_number: 9,133,562
+Stack prop output power: 432 kW, Pcomp: 40.6 kW
+Cell efficiency: 0.296, Output efficiency: 0.257
+mdot_h2: 11.32 g/s
+Reynolds_number: 9,133,562
+Stack prop output power: 432 kW, Pcomp: 40.6 kW
+Cell efficiency: 0.296, Output efficiency: 0.257
+mdot_h2: 11.32 g/s
+Reynolds_number: 9,133,562
+Traceback (most recent call last):
+  File "/home/shoh95/Programming/HFCAD/app/main.py", line 2669, in <module>
+    main()
+  File "/home/shoh95/Programming/HFCAD/app/main.py", line 2643, in main
+    cfg_used, phases, mass, _trade_df = runner.run(out_dir=out_dir)
+                                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/shoh95/Programming/HFCAD/app/main.py", line 2145, in run
+    return self._run_min_mtom(out_dir=out_dir)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/shoh95/Programming/HFCAD/app/main.py", line 2245, in _run_min_mtom
+    phases_i, mass_i = design.run(initial_mtom_kg=mtom_seed, initial_total_power_guess_w=p_seed)
+                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/shoh95/Programming/HFCAD/app/main.py", line 1745, in run
+    phases["climb"] = self._phase_solver.solve(
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/shoh95/Programming/HFCAD/app/main.py", line 1257, in solve
+    nacelle = self._fc.size_nacelle(
+              ^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/shoh95/Programming/HFCAD/app/main.py", line 1135, in size_nacelle
+    float(compressor_mass_model(geom_comp, power_comp, stl_path=self._comp_stl_path))
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/shoh95/Programming/HFCAD/app/models/compressor_mass.py", line 69, in compressor_mass_model
+    res = res.union(part)
+          ^^^^^^^^^^^^^^^
+  File "/home/shoh95/anaconda3/envs/aerofc/lib/python3.12/site-packages/cadquery/cq.py", line 3403, in union
+    r = solidRef.fuse(*newS, glue=glue, tol=tol)
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/shoh95/anaconda3/envs/aerofc/lib/python3.12/site-packages/cadquery/occ_impl/shapes.py", line 4734, in fuse
+    rv = self._bool_op(args[:1], args[1:], fuse_op)
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/shoh95/anaconda3/envs/aerofc/lib/python3.12/site-packages/cadquery/occ_impl/shapes.py", line 1295, in _bool_op
+    op.Build()
+KeyboardInterrupt
+
+[run_sweep] FAIL criteria: artifact not found or empty
+[run_sweep] expected artifact: results/input_sweep_r1/h5000_M0.35_R1500km_PL1000kg/ConvergedData.txt
+[run_sweep] exit code: 130
