@@ -2324,49 +2324,149 @@ class CoupledConstraintSizingRunner:
         cfg = self._cfg
         cs = cfg.constraint_sizing
 
-        ws_grid = self._wingloading_grid_pa()
-
-        # Compute constraint curves once (P/W vs W/S is independent of MTOM for this model).
-        curves, wsmax_cleanstall_pa = self._adr.power_to_weight_curves_kw_per_kg(
-            wingloading_pa=ws_grid, mtom_kg=float(cfg.initial_mtom_kg)
-        )
-
-        combined = np.asarray(curves.get("combined"), dtype=float)
-        valid = np.isfinite(combined)
-        if wsmax_cleanstall_pa is not None:
-            valid &= ws_grid <= float(wsmax_cleanstall_pa)
-
-        idxs = np.where(valid)[0]
-        if idxs.size == 0:
-            raise RuntimeError("No feasible W/S points for selection='min_mtom' (check constraints / stall limit).")
+        ws_grid_coarse = self._wingloading_grid_pa()
+        ws_full_span_pa = float(cs.ws_max_pa - cs.ws_min_pa)
+        refine_passes = max(0, int(cs.ws_refine_passes))
+        refine_span_fraction = float(cs.ws_refine_span_fraction)
+        if refine_passes > 0 and refine_span_fraction <= 0.0:
+            logger.warning(
+                "ws_refine_passes=%d requested but ws_refine_span_fraction<=0; disabling refinement.",
+                refine_passes,
+            )
+            refine_passes = 0
 
         # Optional: silence iterative logs during trade scan
         old_level = logger.level
         if cs.scan_quiet:
             logger.setLevel(logging.WARNING)
 
-        rows: List[Dict[str, float]] = []
+        rows: List[Dict[str, object]] = []
         best: Optional[Tuple[float, DesignConfig, Dict[str, PhasePowerResult], MassBreakdown, ADRpyDesignPoint]] = None
+        skipped_points = 0
+        scanned_points = 0
+        feasible_points = 0
+        seen_ws_keys: set[float] = set()
 
         # Seed guesses
         mtom_seed = float(cfg.initial_mtom_kg)
         p_seed = float(cfg.initial_total_power_guess_w)
 
-        try:
+        def _build_refine_grid(
+            *,
+            ws_center_pa: float,
+            ws_half_span_pa: float,
+            ws_step_pa: float,
+        ) -> np.ndarray:
+            ws_min_local = max(float(cs.ws_min_pa), float(ws_center_pa) - float(ws_half_span_pa))
+            ws_max_local = min(float(cs.ws_max_pa), float(ws_center_pa) + float(ws_half_span_pa))
+            if ws_max_local <= ws_min_local:
+                return np.asarray([float(ws_center_pa)], dtype=float)
+            n = int(math.floor((ws_max_local - ws_min_local) / float(ws_step_pa))) + 1
+            grid = ws_min_local + float(ws_step_pa) * np.arange(max(1, n), dtype=float)
+            if grid[-1] < ws_max_local - 1e-9:
+                grid = np.append(grid, ws_max_local)
+            grid = np.append(grid, float(ws_center_pa))
+            grid = np.clip(grid, float(cs.ws_min_pa), float(cs.ws_max_pa))
+            return np.asarray(np.unique(np.round(grid, 9)), dtype=float)
+
+        def _scan_ws_grid(
+            *,
+            ws_grid: np.ndarray,
+            pass_id: int,
+            stage: str,
+        ) -> None:
+            nonlocal best
+            nonlocal mtom_seed
+            nonlocal p_seed
+            nonlocal skipped_points
+            nonlocal scanned_points
+            nonlocal feasible_points
+
+            # Compute ADRpy curves for this pass grid (feasibility model).
+            curves, wsmax_cleanstall_pa = self._adr.power_to_weight_curves_kw_per_kg(
+                wingloading_pa=ws_grid, mtom_kg=float(cfg.initial_mtom_kg)
+            )
+
+            combined = np.asarray(curves.get("combined"), dtype=float)
+            valid = np.isfinite(combined)
+            if wsmax_cleanstall_pa is not None:
+                valid &= ws_grid <= float(wsmax_cleanstall_pa)
+
+            idxs = np.where(valid)[0]
+            if idxs.size == 0:
+                logger.warning(
+                    "No feasible W/S points in %s pass %d (grid %.1f..%.1f Pa).",
+                    stage,
+                    pass_id,
+                    float(np.min(ws_grid)),
+                    float(np.max(ws_grid)),
+                )
+                return
+            feasible_points += int(idxs.size)
+
+            ws_feasible = np.asarray(ws_grid[idxs], dtype=float)
+            logger.info(
+                "ADRpy feasible W/S window (%s pass %d): %.1f .. %.1f Pa (%.2f .. %.2f kg/m^2), %d points",
+                stage,
+                pass_id,
+                float(np.min(ws_feasible)),
+                float(np.max(ws_feasible)),
+                float(np.min(ws_feasible)) / _G0_MPS2,
+                float(np.max(ws_feasible)) / _G0_MPS2,
+                int(ws_feasible.size),
+            )
+
             for idx in idxs:
                 dp = self._adr._design_point_from_curves(wingloading_pa=ws_grid, curves=curves, idx=int(idx))
+                ws_key = round(float(dp.wing_loading_pa), 6)
+                if ws_key in seen_ws_keys:
+                    continue
+                seen_ws_keys.add(ws_key)
+                scanned_points += 1
+
                 cfg_i = self._apply_design_point_to_cfg(cfg, dp)
 
-                # Run mass-closure
-                design = HybridFuelCellAircraftDesign(cfg_i, out_dir=out_dir)
-                phases_i, mass_i = design.run(initial_mtom_kg=mtom_seed, initial_total_power_guess_w=p_seed)
+                # Run mass-closure for this design point
+                try:
+                    design = HybridFuelCellAircraftDesign(cfg_i, out_dir=out_dir)
+                    phases_i, mass_i = design.run(initial_mtom_kg=mtom_seed, initial_total_power_guess_w=p_seed)
+                except Exception as e:
+                    skipped_points += 1
+                    logger.warning(
+                        "Skipping W/S=%.1f Pa (%.2f kg/m^2) in %s pass %d: %s",
+                        dp.wing_loading_pa,
+                        dp.wing_loading_kg_per_m2,
+                        stage,
+                        pass_id,
+                        str(e),
+                    )
+                    rows.append(
+                        {
+                            "scan_stage": stage,
+                            "scan_pass": int(pass_id),
+                            "wing_loading_pa": dp.wing_loading_pa,
+                            "wing_loading_kg_per_m2": dp.wing_loading_kg_per_m2,
+                            "p_w_takeoff_kw_per_kg": dp.p_w_takeoff_kw_per_kg,
+                            "p_w_climb_kw_per_kg": dp.p_w_climb_kw_per_kg,
+                            "p_w_cruise_kw_per_kg": dp.p_w_cruise_kw_per_kg,
+                            "mtom_kg": np.nan,
+                            "p_total_climb_kw": np.nan,
+                            "p_total_cruise_kw": np.nan,
+                            "p_total_takeoff_kw": np.nan,
+                            "status": "failed",
+                            "error": str(e),
+                        }
+                    )
+                    continue
 
-                # Update seeds for next point (helps convergence across the scan)
+                # Warm-start next design-point solve.
                 mtom_seed = float(mass_i.mtom_kg)
                 p_seed = float(phases_i["climb"].p_total_w)
 
                 rows.append(
                     {
+                        "scan_stage": stage,
+                        "scan_pass": int(pass_id),
                         "wing_loading_pa": dp.wing_loading_pa,
                         "wing_loading_kg_per_m2": dp.wing_loading_kg_per_m2,
                         "p_w_takeoff_kw_per_kg": dp.p_w_takeoff_kw_per_kg,
@@ -2376,18 +2476,55 @@ class CoupledConstraintSizingRunner:
                         "p_total_climb_kw": float(phases_i["climb"].p_total_w) / 1000.0,
                         "p_total_cruise_kw": float(phases_i["cruise"].p_total_w) / 1000.0,
                         "p_total_takeoff_kw": float(phases_i["takeoff"].p_total_w) / 1000.0,
+                        "status": "ok",
+                        "error": "",
                     }
                 )
 
                 if best is None or mass_i.mtom_kg < best[0]:
                     best = (float(mass_i.mtom_kg), cfg_i, phases_i, mass_i, dp)
 
+        try:
+            # Coarse pass over user-provided range and step.
+            _scan_ws_grid(ws_grid=ws_grid_coarse, pass_id=0, stage="coarse")
+
+            # Local refinement passes around current best W/S.
+            for p in range(refine_passes):
+                if best is None:
+                    break
+                best_dp = best[4]
+                ws_half_span_pa = ws_full_span_pa * refine_span_fraction * (0.5 ** p)
+                ws_step_pa = float(cs.ws_step_pa) * (0.5 ** (p + 1))
+                ws_grid_refine = _build_refine_grid(
+                    ws_center_pa=float(best_dp.wing_loading_pa),
+                    ws_half_span_pa=float(ws_half_span_pa),
+                    ws_step_pa=float(ws_step_pa),
+                )
+                logger.info(
+                    "Refine pass %d/%d: center %.1f Pa, half-span %.1f Pa, step %.3f Pa (%d points)",
+                    p + 1,
+                    refine_passes,
+                    float(best_dp.wing_loading_pa),
+                    float(ws_half_span_pa),
+                    float(ws_step_pa),
+                    int(ws_grid_refine.size),
+                )
+                _scan_ws_grid(ws_grid=ws_grid_refine, pass_id=p + 1, stage="refine")
+
         finally:
             if cs.scan_quiet:
                 logger.setLevel(old_level)
 
         if best is None:
-            raise RuntimeError("No feasible designs found during selection='min_mtom' scan.")
+            if feasible_points == 0:
+                raise RuntimeError(
+                    "No feasible W/S points for selection='min_mtom' "
+                    "(check ADRpy constraints and stall limit settings)."
+                )
+            raise RuntimeError(
+                "No feasible designs found during selection='min_mtom' scan "
+                f"(all {scanned_points} scanned points failed in mass-closure)."
+            )
 
         best_mtom, best_cfg, best_phases, best_mass, best_dp = best
 
@@ -2401,6 +2538,12 @@ class CoupledConstraintSizingRunner:
             best_dp.p_w_climb_kw_per_kg,
             best_dp.p_w_cruise_kw_per_kg,
         )
+        if skipped_points > 0:
+            logger.warning(
+                "Constraint scan skipped %d/%d W/S points due to mass-closure failures; selected best from remaining points.",
+                skipped_points,
+                scanned_points,
+            )
 
         df = pd.DataFrame(rows)
         if out_dir is not None and cs.write_trade_csv:
