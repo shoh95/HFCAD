@@ -283,6 +283,12 @@ class SolverConfig:
     # and fall back to bisection/regula-falsi if the Newton proposal is unsafe.
     newton_use_bracketing: bool = True
 
+    # Infeasibility guard: stop early if residual stays on one side and does not improve
+    # enough despite moving MTOM in the expected direction.
+    infeasible_pos_streak_iters: int = 5
+    infeasible_min_residual_reduction: float = 0.05
+    infeasible_min_mtom_drop_kg: float = 1.0
+
 
 
 @dataclass(frozen=True)
@@ -1695,6 +1701,7 @@ class HybridFuelCellAircraftDesign:
         # Bracketing points for residual sign (if encountered)
         pos_pt: Optional[Tuple[float, float]] = None  # (mtom, residual) with residual > 0
         neg_pt: Optional[Tuple[float, float]] = None  # (mtom, residual) with residual < 0
+        pos_residual_streak: List[Tuple[float, float]] = []  # recent (mtom, residual) for residual > 0
 
         relax = float(cfg.solver.newton_relax_init)
 
@@ -1798,6 +1805,32 @@ class HybridFuelCellAircraftDesign:
                 logger.info("\nCONVERGED")
                 return phases, mass
 
+            # Early stop for likely infeasible closure:
+            # residual remains positive while MTOM is pushed down, but residual barely drops.
+            if math.isfinite(residual) and residual > 0.0:
+                pos_residual_streak.append((float(mtom), float(residual)))
+            else:
+                pos_residual_streak.clear()
+
+            streak_n = max(1, int(cfg.solver.infeasible_pos_streak_iters))
+            if len(pos_residual_streak) >= streak_n:
+                mtom_start, res_start = pos_residual_streak[-streak_n]
+                mtom_drop = float(mtom_start - mtom)
+                if res_start != 0.0:
+                    residual_reduction = float((res_start - residual) / abs(res_start))
+                else:
+                    residual_reduction = 0.0
+
+                if (
+                    mtom_drop >= float(cfg.solver.infeasible_min_mtom_drop_kg)
+                    and residual_reduction < float(cfg.solver.infeasible_min_residual_reduction)
+                ):
+                    raise RuntimeError(
+                        "Infeasible MTOM closure detected: residual stayed positive for "
+                        f"{streak_n} iterations while MTOM dropped by {mtom_drop:,.2f} kg "
+                        f"but residual reduction was only {100.0 * residual_reduction:.2f}%."
+                    )
+
             # -----------------
             # MTOM update
             # -----------------
@@ -1839,20 +1872,31 @@ class HybridFuelCellAircraftDesign:
                                 neg_pt = (mtom, residual)
 
                 mtom_prop: Optional[float] = None
+                bracketed = (pos_pt is not None) and (neg_pt is not None)
 
-                # Newton step with secant slope (1 evaluation/iter after the first)
-                if prev_mtom is not None and prev_res is not None:
-                    dm = mtom - prev_mtom
-                    dr = residual - prev_res
-                    if dm != 0.0 and dr != 0.0:
-                        slope = dr / dm  # ≈ d(residual)/d(mtom)
-                        if math.isfinite(slope) and abs(slope) > float(cfg.solver.newton_slope_eps):
-                            mtom_newton = mtom - residual / slope
-                            mtom_prop = mtom + relax * (mtom_newton - mtom)
-                            step_note = "newton"
+                # If configured, Newton is disabled before the first sign-changing bracket exists.
+                if bool(cfg.solver.newton_use_bracketing) and (not bracketed):
+                    mtom_prop = mtom + float(cfg.solver.newton_fp_relax) * residual
+                    step_note = "fixed_point_prebracket"
+                else:
+                    # Newton step with secant slope (1 evaluation/iter after the first)
+                    if prev_mtom is not None and prev_res is not None:
+                        dm = mtom - prev_mtom
+                        dr = residual - prev_res
+                        if dm != 0.0 and dr != 0.0:
+                            slope = dr / dm  # ≈ d(residual)/d(mtom)
+                            if math.isfinite(slope) and abs(slope) > float(cfg.solver.newton_slope_eps):
+                                if slope <= 0.0:
+                                    mtom_newton = mtom - residual / slope
+                                    mtom_prop = mtom + relax * (mtom_newton - mtom)
+                                    step_note = "newton"
+                                else:
+                                    # Positive slope is unsafe for this residual convention.
+                                    mtom_prop = None
+                                    step_note = "newton_reject_slope_pos"
 
                 # If bracketed, ensure the proposal stays inside (fall back if needed)
-                if bool(cfg.solver.newton_use_bracketing) and (pos_pt is not None) and (neg_pt is not None):
+                if bool(cfg.solver.newton_use_bracketing) and bracketed:
                     x_pos, f_pos = pos_pt
                     x_neg, f_neg = neg_pt
                     lo = min(x_pos, x_neg)

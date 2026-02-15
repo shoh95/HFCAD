@@ -1,0 +1,16 @@
+Traceback (most recent call last):
+  File "/home/shoh95/Programming/HFCAD/app/main.py", line 2669, in <module>
+    main()
+  File "/home/shoh95/Programming/HFCAD/app/main.py", line 2643, in main
+    cfg_used, phases, mass, _trade_df = runner.run(out_dir=out_dir)
+                                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/shoh95/Programming/HFCAD/app/main.py", line 2145, in run
+    return self._run_min_mtom(out_dir=out_dir)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/shoh95/Programming/HFCAD/app/main.py", line 2224, in _run_min_mtom
+    raise RuntimeError("No feasible W/S points for selection='min_mtom' (check constraints / stall limit).")
+RuntimeError: No feasible W/S points for selection='min_mtom' (check constraints / stall limit).
+
+[run_sweep] FAIL criteria: artifact not found or empty
+[run_sweep] expected artifact: results/input_sweep_r7/h6000_M0.35_R1000km_PL1000kg/ConvergedData.txt
+[run_sweep] exit code: 1

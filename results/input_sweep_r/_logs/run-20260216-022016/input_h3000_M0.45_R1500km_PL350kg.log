@@ -1,0 +1,16 @@
+Traceback (most recent call last):
+  File "/home/shoh95/Programming/HFCAD/app/main.py", line 2669, in <module>
+    main()
+  File "/home/shoh95/Programming/HFCAD/app/main.py", line 2630, in main
+    cfg = load_design_config(input_path)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/shoh95/Programming/HFCAD/app/main.py", line 751, in load_design_config
+    constraint_brief = _update_dataclass_from_section(
+                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/shoh95/Programming/HFCAD/app/main.py", line 672, in _update_dataclass_from_section
+    raise KeyError(
+KeyError: 'Unknown keys in section [constraint_brief]: ws_max_pa, ws_min_pa, ws_step_pa. Allowed keys: climbalt_m, climbrate_fpm, climbspeed_kias, cruisealt_m, cruisespeed_ktas, cruisethrustfact, groundrun_m, rwyelevation_m, secclimbspd_kias, servceil_m, stloadfactor, turnalt_m, turnspeed_ktas, vstallclean_kcas'
+
+[run_sweep] FAIL criteria: artifact not found or empty
+[run_sweep] expected artifact: results/input_sweep_r7/h3000_M0.45_R1500km_PL350kg/ConvergedData.txt
+[run_sweep] exit code: 1
