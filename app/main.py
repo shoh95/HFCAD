@@ -330,6 +330,10 @@ class ConstraintSizingConfig:
     # Optional refinement passes for selection='min_mtom' (0 disables refinement).
     ws_refine_passes: int = 0
     ws_refine_span_fraction: float = 0.20  # +/- span around current best (fraction of full range)
+    # Auto-expand W/S scan range if ADRpy feasible window appears clipped by current bounds.
+    ws_auto_widen_enable: bool = True
+    ws_auto_widen_factor: float = 1.50
+    ws_auto_widen_max_passes: int = 2
 
     # Multiplicative margin applied to all constraint-derived P/W outputs.
     pw_margin_fraction: float = 0.0
@@ -2324,10 +2328,28 @@ class CoupledConstraintSizingRunner:
         cfg = self._cfg
         cs = cfg.constraint_sizing
 
-        ws_grid_coarse = self._wingloading_grid_pa()
-        ws_full_span_pa = float(cs.ws_max_pa - cs.ws_min_pa)
+        ws_step_pa = float(cs.ws_step_pa)
+        if ws_step_pa <= 0.0:
+            raise ValueError("constraint_sizing.ws_step_pa must be > 0")
+        ws_scan_min_pa = float(cs.ws_min_pa)
+        ws_scan_max_pa = float(cs.ws_max_pa)
+        if ws_scan_max_pa <= ws_scan_min_pa:
+            raise ValueError("constraint_sizing.ws_max_pa must be > ws_min_pa")
+
         refine_passes = max(0, int(cs.ws_refine_passes))
         refine_span_fraction = float(cs.ws_refine_span_fraction)
+        auto_widen_enable = bool(cs.ws_auto_widen_enable)
+        auto_widen_factor = float(cs.ws_auto_widen_factor)
+        auto_widen_max_passes = max(0, int(cs.ws_auto_widen_max_passes))
+        if auto_widen_enable and auto_widen_factor <= 1.0:
+            logger.warning(
+                "ws_auto_widen_enable=True but ws_auto_widen_factor<=1.0; disabling auto-widen.",
+            )
+            auto_widen_enable = False
+
+        # For min_mtom, always focus the first MTOM scan near ADRpy minimum combined P/W.
+        # If refine span fraction is invalid, keep refinement disabled but still use a sane focus span.
+        focus_span_fraction = refine_span_fraction if refine_span_fraction > 0.0 else 0.20
         if refine_passes > 0 and refine_span_fraction <= 0.0:
             logger.warning(
                 "ws_refine_passes=%d requested but ws_refine_span_fraction<=0; disabling refinement.",
@@ -2351,14 +2373,24 @@ class CoupledConstraintSizingRunner:
         mtom_seed = float(cfg.initial_mtom_kg)
         p_seed = float(cfg.initial_total_power_guess_w)
 
+        def _wingloading_grid_from_bounds(*, ws_min_pa: float, ws_max_pa: float) -> np.ndarray:
+            if ws_max_pa <= ws_min_pa:
+                raise ValueError("constraint_sizing.ws_max_pa must be > ws_min_pa")
+            # Include end point when bounds are not an exact multiple of step.
+            n = int(math.floor((ws_max_pa - ws_min_pa) / ws_step_pa)) + 1
+            grid = ws_min_pa + ws_step_pa * np.arange(max(1, n), dtype=float)
+            if grid[-1] < ws_max_pa - 1e-9:
+                grid = np.append(grid, ws_max_pa)
+            return np.asarray(grid, dtype=float)
+
         def _build_refine_grid(
             *,
             ws_center_pa: float,
             ws_half_span_pa: float,
             ws_step_pa: float,
         ) -> np.ndarray:
-            ws_min_local = max(float(cs.ws_min_pa), float(ws_center_pa) - float(ws_half_span_pa))
-            ws_max_local = min(float(cs.ws_max_pa), float(ws_center_pa) + float(ws_half_span_pa))
+            ws_min_local = max(float(ws_scan_min_pa), float(ws_center_pa) - float(ws_half_span_pa))
+            ws_max_local = min(float(ws_scan_max_pa), float(ws_center_pa) + float(ws_half_span_pa))
             if ws_max_local <= ws_min_local:
                 return np.asarray([float(ws_center_pa)], dtype=float)
             n = int(math.floor((ws_max_local - ws_min_local) / float(ws_step_pa))) + 1
@@ -2366,8 +2398,108 @@ class CoupledConstraintSizingRunner:
             if grid[-1] < ws_max_local - 1e-9:
                 grid = np.append(grid, ws_max_local)
             grid = np.append(grid, float(ws_center_pa))
-            grid = np.clip(grid, float(cs.ws_min_pa), float(cs.ws_max_pa))
+            grid = np.clip(grid, float(ws_scan_min_pa), float(ws_scan_max_pa))
             return np.asarray(np.unique(np.round(grid, 9)), dtype=float)
+
+        # ADRpy pre-selection: identify feasible W/S region and center the MTOM search
+        # around the point that minimises combined P/W.
+        seed_expand_pass = 0
+        ws_seed_pa = float("nan")
+        pw_seed_kw_per_kg = float("nan")
+        wsmax_cleanstall_pa: Optional[float] = None
+        while True:
+            ws_grid_user = _wingloading_grid_from_bounds(ws_min_pa=ws_scan_min_pa, ws_max_pa=ws_scan_max_pa)
+            curves_seed, wsmax_cleanstall_pa = self._adr.power_to_weight_curves_kw_per_kg(
+                wingloading_pa=ws_grid_user, mtom_kg=float(cfg.initial_mtom_kg)
+            )
+            combined_seed = np.asarray(curves_seed.get("combined"), dtype=float)
+            valid_seed = np.isfinite(combined_seed)
+            if wsmax_cleanstall_pa is not None:
+                valid_seed &= ws_grid_user <= float(wsmax_cleanstall_pa)
+
+            idxs_seed = np.where(valid_seed)[0]
+            if idxs_seed.size == 0:
+                raise RuntimeError("No feasible W/S points for selection='min_mtom' (check constraints / stall limit).")
+
+            ws_feasible = np.asarray(ws_grid_user[idxs_seed], dtype=float)
+            ws_feasible_min = float(np.min(ws_feasible))
+            ws_feasible_max = float(np.max(ws_feasible))
+            i_pw_seed = self._adr._select_index_min(combined_seed, valid_mask=valid_seed)
+            ws_seed_pa = float(ws_grid_user[i_pw_seed])
+            pw_seed_kw_per_kg = float(combined_seed[i_pw_seed])
+
+            logger.info(
+                "ADRpy feasible W/S window (seed pass %d): %.1f .. %.1f Pa (%.2f .. %.2f kg/m^2), %d points",
+                seed_expand_pass,
+                ws_feasible_min,
+                ws_feasible_max,
+                ws_feasible_min / _G0_MPS2,
+                ws_feasible_max / _G0_MPS2,
+                int(ws_feasible.size),
+            )
+
+            ws_tol_pa = max(1e-9, 0.51 * ws_step_pa)
+            touches_lower = math.isclose(ws_feasible_min, ws_scan_min_pa, abs_tol=ws_tol_pa)
+            touches_upper = math.isclose(ws_feasible_max, ws_scan_max_pa, abs_tol=ws_tol_pa)
+            seed_on_boundary = (
+                math.isclose(ws_seed_pa, ws_feasible_min, abs_tol=ws_tol_pa)
+                or math.isclose(ws_seed_pa, ws_feasible_max, abs_tol=ws_tol_pa)
+            )
+            should_widen = (
+                auto_widen_enable
+                and seed_expand_pass < auto_widen_max_passes
+                and (touches_lower or touches_upper or seed_on_boundary)
+            )
+            if not should_widen:
+                if seed_on_boundary:
+                    logger.warning(
+                        "ADRpy minimum combined P/W seed remains on feasible W/S boundary (%.1f Pa). "
+                        "Proceeding with current W/S range %.1f..%.1f Pa.",
+                        ws_seed_pa,
+                        ws_scan_min_pa,
+                        ws_scan_max_pa,
+                    )
+                break
+
+            old_min_pa = ws_scan_min_pa
+            old_max_pa = ws_scan_max_pa
+            old_span_pa = old_max_pa - old_min_pa
+            new_span_pa = old_span_pa * auto_widen_factor
+            ws_center_pa = 0.5 * (old_min_pa + old_max_pa)
+            ws_scan_min_pa = max(ws_step_pa, ws_center_pa - 0.5 * new_span_pa)
+            ws_scan_max_pa = ws_center_pa + 0.5 * new_span_pa
+
+            logger.info(
+                "Auto-widening W/S scan window for seed analysis: %.1f..%.1f -> %.1f..%.1f Pa "
+                "(factor %.3f, lower_hit=%s, upper_hit=%s, seed_on_edge=%s).",
+                old_min_pa,
+                old_max_pa,
+                ws_scan_min_pa,
+                ws_scan_max_pa,
+                auto_widen_factor,
+                str(touches_lower),
+                str(touches_upper),
+                str(seed_on_boundary),
+            )
+            seed_expand_pass += 1
+
+        ws_full_span_pa = float(ws_scan_max_pa - ws_scan_min_pa)
+
+        ws_seed_half_span_pa = max(float(cs.ws_step_pa), ws_full_span_pa * focus_span_fraction)
+        ws_grid_focus = _build_refine_grid(
+            ws_center_pa=ws_seed_pa,
+            ws_half_span_pa=ws_seed_half_span_pa,
+            ws_step_pa=float(cs.ws_step_pa),
+        )
+        logger.info(
+            "min_mtom seed from ADRpy min combined P/W: W/S=%.1f Pa, combined P/W=%.5f kW/kg; "
+            "initial focus window %.1f..%.1f Pa (%d points)",
+            ws_seed_pa,
+            pw_seed_kw_per_kg,
+            float(np.min(ws_grid_focus)),
+            float(np.max(ws_grid_focus)),
+            int(ws_grid_focus.size),
+        )
 
         def _scan_ws_grid(
             *,
@@ -2485,8 +2617,8 @@ class CoupledConstraintSizingRunner:
                     best = (float(mass_i.mtom_kg), cfg_i, phases_i, mass_i, dp)
 
         try:
-            # Coarse pass over user-provided range and step.
-            _scan_ws_grid(ws_grid=ws_grid_coarse, pass_id=0, stage="coarse")
+            # First pass over a focused W/S region around ADRpy min combined P/W.
+            _scan_ws_grid(ws_grid=ws_grid_focus, pass_id=0, stage="focus")
 
             # Local refinement passes around current best W/S.
             for p in range(refine_passes):
