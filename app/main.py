@@ -229,6 +229,49 @@ class FuselageConfig:
 
 
 @dataclass(frozen=True)
+class TailConfig:
+    """Inputs for `TailCompu`-style horizontal/vertical tail sizing."""
+
+    enable: bool = True
+
+    # Tail arm coefficients relative to fuselage length
+    ll_ht: float = 0.49380955
+    ll_vt: float = 0.48267689
+
+    # Non-dimensional tail volume coefficients
+    c_ht: float = 0.9
+    c_vt: float = 0.09
+
+    # Sizing geometry assumptions
+    # Legacy fixed main-wing x location in meters from nose (retained for compatibility).
+    l_wing_m: float = 8.7
+    # If true, use `main_wing_loacation_m` as wing root x-location.
+    # If false, place wing root at `0.4 * fuselage_length`.
+    main_wing_location: bool = False
+    main_wing_loacation_m: float = 8.7
+    a_ht: float = 5.0
+    lamda_ht: float = 0.4
+    a_vt: float = 1.92
+    lamda_vt: float = 0.4
+
+    # Wing reference point/airfoil placement
+    x_fuse_mm: float = 0.0
+    ac: float = 0.25
+    wingpos: str = "rand"
+    theta_le_deg: float = 5.0
+    theta_le_ht_deg: float = 10.0
+    theta_le_vt_deg: float = 25.0
+
+    # Empirical cap offsets used by the original TailCompu formulation
+    delta_hs_cap_length_mm: float = 600.0
+    delta_vs_cap_length_mm: float = 300.0
+
+    # Tail iteration settings
+    max_iter: int = 200
+    tol_m: float = 1e-5
+
+
+@dataclass(frozen=True)
 class WeightsConfig:
     """Non-structural mass items and payload assumptions."""
 
@@ -448,6 +491,7 @@ class DesignConfig:
 
     wing: WingConfig = WingConfig()
     fuselage: FuselageConfig = FuselageConfig()
+    tail: TailConfig = TailConfig()
     weights: WeightsConfig = WeightsConfig()
 
     solver: SolverConfig = SolverConfig()
@@ -717,7 +761,7 @@ def load_design_config(input_path: Path) -> DesignConfig:
     Sections map to the nested dataclasses in DesignConfig:
       mission, flight, fuel_cell_arch, fuel_cell_op, hybrid, eff, densities, p_w,
       cooling, hydrogen, wing, fuselage, weights, solver,
-      constraint_sizing, constraint_brief, constraint_performance, constraint_geometry,
+      constraint_sizing, constraint_brief, constraint_performance, constraint_geometry, tail,
       design
     """
 
@@ -766,6 +810,7 @@ def load_design_config(input_path: Path) -> DesignConfig:
         wing_sec = _normalize_wing_section(wing_sec)
     wing = _update_dataclass_from_section(cfg_default.wing, "wing", wing_sec)
     fuselage = _update_dataclass_from_section(cfg_default.fuselage, "fuselage", section("fuselage"))
+    tail = _update_dataclass_from_section(cfg_default.tail, "tail", section("tail"))
     weights = _update_dataclass_from_section(cfg_default.weights, "weights", section("weights"))
 
     solver = _update_dataclass_from_section(cfg_default.solver, "solver", section("solver"))
@@ -815,6 +860,7 @@ def load_design_config(input_path: Path) -> DesignConfig:
         hydrogen=hydrogen,
         wing=wing,
         fuselage=fuselage,
+        tail=tail,
         weights=weights,
         solver=solver,
         constraint_sizing=constraint_sizing,
@@ -866,6 +912,7 @@ def write_input_template(path: Path, cfg: Optional[DesignConfig] = None) -> None
     section("hydrogen", cfg.hydrogen)
     section("wing", cfg.wing)
     section("fuselage", cfg.fuselage)
+    section("tail", cfg.tail)
     section("weights", cfg.weights)
     section("solver", cfg.solver)
 
@@ -953,6 +1000,22 @@ class PhasePowerResult:
 
 
 @dataclass(frozen=True)
+class TailSizingResult:
+    """Computed tail sizing outputs used by legacy Raymer sizing inputs."""
+
+    s_ht_m2: float
+    s_vt_m2: float
+    b_ht_m: float
+    b_vt_m: float
+    l_ht_act_m: float
+    l_vt_act_m: float
+    x_true_ht_m: float
+    x_true_vt_m: float
+    c_ht_act: float
+    c_vt_act: float
+
+
+@dataclass(frozen=True)
 class MassBreakdown:
     mtom_kg: float
 
@@ -994,6 +1057,14 @@ class MassBreakdown:
     fuselage_length_m: float
     tank_length_m: float
     tank_volume_m3: float
+    s_ht_m2: float
+    s_vt_m2: float
+    b_ht_m: float
+    b_vt_m: float
+    l_ht_act_m: float
+    l_vt_act_m: float
+    x_true_ht_m: float
+    x_true_vt_m: float
 
     # Derived/aux
     p_fuelcell_engine_w: float
@@ -1341,6 +1412,179 @@ class MassEstimator:
     def v_cruise_mps(self) -> float:
         return self._v_cr_mps
 
+    def _wing_planform_geometry(self, *, S: float, b: float, lamda: float) -> Tuple[float, float, float, float]:
+        """Return simple tapered-wing geometric parameters: Croot, Ctip, Cbar, Ybar."""
+
+        if b <= 0.0 or S <= 0.0:
+            raise ValueError("Wing area and span must be positive for tail sizing.")
+        if lamda <= 0.0:
+            raise ValueError("Wing taper ratio must be positive for tail sizing.")
+
+        croot = 2 * S / (b * (1 + lamda))
+        ctip = lamda * croot
+        cbar = 2.0 / 3.0 * croot * ((1 + lamda + lamda**2) / (1 + lamda))
+        ybar = b / 6.0 * ((1 + 2 * lamda) / (1 + lamda))
+        return croot, ctip, cbar, ybar
+
+    def _size_tails(self, *, FL: float, S: float, b: float, lamda: float, cfg_tail) -> TailSizingResult:
+        """Compute tail geometry using TailCompu-style sizing iteration."""
+
+        from math import sqrt, tan
+
+        min_tail_arm = 0.05
+        if not cfg_tail.enable:
+            raise RuntimeError("Tail sizing disabled, fallback should skip this method.")
+
+        if FL <= 0.0 or S <= 0.0 or b <= 0.0:
+            raise ValueError("Fuselage length, wing area, and span must be positive for tail sizing.")
+
+        _, _, cbar, ybar = self._wing_planform_geometry(S=S, b=b, lamda=lamda)
+
+        if bool(cfg_tail.main_wing_location):
+            l_wing = float(cfg_tail.main_wing_loacation_m)
+        else:
+            l_wing = float(FL * 0.3)
+
+        # Keep a hard validity check for root location placement.
+        if l_wing <= 0.0:
+            raise ValueError("Computed wing-root x location is invalid for tail sizing.")
+
+        ll_ht = float(cfg_tail.ll_ht)
+        ll_vt = float(cfg_tail.ll_vt)
+        c_ht = float(cfg_tail.c_ht)
+        c_vt = float(cfg_tail.c_vt)
+        a_ht = float(cfg_tail.a_ht)
+        lamda_ht = float(cfg_tail.lamda_ht)
+        a_vt = float(cfg_tail.a_vt)
+        lamda_vt = float(cfg_tail.lamda_vt)
+        x_fuse_mm = float(cfg_tail.x_fuse_mm)
+        ac = float(cfg_tail.ac)
+        theta_le = math.radians(float(cfg_tail.theta_le_deg))
+        theta_le_ht = math.radians(float(cfg_tail.theta_le_ht_deg))
+        theta_le_vt = math.radians(float(cfg_tail.theta_le_vt_deg))
+
+        delta_hs_mm = float(cfg_tail.delta_hs_cap_length_mm)
+        delta_vs_mm = float(cfg_tail.delta_vs_cap_length_mm)
+        wingpos = str(cfg_tail.wingpos).strip().lower()
+
+        ll_ht = max(min_tail_arm, ll_ht)
+        ll_vt = max(min_tail_arm, ll_vt)
+
+        if a_ht < 3.5:
+            a_ht = 3.5
+        elif a_ht > 4.5:
+            a_ht = 4.5
+
+        if lamda <= 0.0 or lamda_ht <= 0.0 or lamda_vt <= 0.0:
+            raise ValueError("Tail sizing requires positive wing/tail taper ratios.")
+
+        k = 1
+        l_wing_ac = ybar * tan(theta_le) + cbar * ac
+
+        while k <= int(cfg_tail.max_iter):
+            if not math.isfinite(ll_ht) or not math.isfinite(ll_vt):
+                raise RuntimeError("Tail sizing diverged to non-finite arm values.")
+
+            l_ht = ll_ht * FL
+            l_vt = ll_vt * FL
+            if l_ht <= 0.0 or l_vt <= 0.0:
+                raise RuntimeError("Tail arm became non-positive during sizing.")
+
+            s_ht = c_ht * cbar * S / l_ht
+            s_vt = c_vt * b * S / l_vt
+            if not (math.isfinite(s_ht) and math.isfinite(s_vt)) or s_ht <= 0.0 or s_vt <= 0.0:
+                raise RuntimeError("Tail sizing produced non-positive tail areas.")
+
+            b_ht = sqrt(a_ht * s_ht)
+            b_vt = sqrt(a_vt * s_vt)
+
+            ybar_ht = b_ht / 6.0 * ((1 + 2 * lamda_ht) / (1 + lamda_ht))
+            cbar_ht = 2.0 / 3.0 * (2 * s_ht / (b_ht * (1 + lamda_ht))) * ((1 + lamda_ht + lamda_ht**2) / (1 + lamda_ht))
+            croot_ht = 2 * s_ht / (b_ht * (1 + lamda_ht))
+
+            ybar_vt = b_vt / 6.0 * ((1 + 2 * lamda_vt) / (1 + lamda_vt))
+            cbar_vt = 2.0 / 3.0 * (2 * s_vt / (b_vt * (1 + lamda_vt))) * ((1 + lamda_vt + lamda_vt**2) / (1 + lamda_vt))
+            croot_vt = 2 * s_vt / (b_vt * (1 + lamda_vt))
+
+            x_wing_mm = l_wing * 1000.0
+            x_ht_mm = (FL - croot_ht - delta_hs_mm / 1000.0) * 1000.0
+            x_vt_mm = (FL - croot_vt - delta_vs_mm / 1000.0) * 1000.0
+
+            x_true_wing_mm = x_wing_mm - x_fuse_mm
+            x_true_ht_mm = x_ht_mm - x_fuse_mm
+            x_true_vt_mm = x_vt_mm - x_fuse_mm
+
+            l_ac_wing_mm = l_wing_ac * 1000.0
+            l_ac_ht = ybar_ht * tan(theta_le_ht) + 0.25 * cbar_ht
+            l_ac_vt = ybar_vt * tan(theta_le_vt) + 0.25 * cbar_vt
+            l_ac_ht_mm = l_ac_ht * 1000.0
+            l_ac_vt_mm = l_ac_vt * 1000.0
+
+            x_ac_wing_mm = x_true_wing_mm + l_ac_wing_mm
+            x_ac_ht_mm = x_true_ht_mm + l_ac_ht_mm
+            x_ac_vt_mm = x_true_vt_mm + l_ac_vt_mm
+
+            l_ht_act_m = (x_ac_ht_mm - x_ac_wing_mm) / 1000.0
+            l_vt_act_m = (x_ac_vt_mm - x_ac_wing_mm) / 1000.0
+            if not (math.isfinite(l_ht_act_m) and math.isfinite(l_vt_act_m)):
+                raise RuntimeError("Tail sizing produced invalid actual tail moment arms.")
+            # Guard transient geometry inversions by using target arms as a recovery step.
+            # This keeps sizing from dropping to legacy defaults when intermediate iterations
+            # briefly become infeasible.
+            if l_ht_act_m <= 0.0:
+                l_ht_act_m = max(min_tail_arm, l_ht)
+            if l_vt_act_m <= 0.0:
+                l_vt_act_m = max(min_tail_arm, l_vt)
+
+            # Keep parity with the legacy expression used by TailCompu:
+            # Cbar_HT = 2/3*S_HT / (b_HT*(1+lamda_HT)) * (1+lamda_HT+lamda_HT^2)/(1+lamda_HT)
+            c_ht_act = s_ht / (cbar * S / l_ht_act_m)
+            c_vt_act = s_vt / (b * S / l_vt_act_m)
+            if not (math.isfinite(c_ht_act) and math.isfinite(c_vt_act)) or c_ht_act <= 0.0 or c_vt_act <= 0.0:
+                raise RuntimeError("Tail sizing produced invalid correction coefficients.")
+
+            l_ac_ht_act = l_ht_act_m
+            l_ac_vt_act = l_vt_act_m
+
+            delta_ht = abs(l_ac_ht_act - l_ht)
+            delta_vt = abs(l_ac_vt_act - l_vt)
+            ll_ht_rcmd = c_ht_act * cbar * S / s_ht / FL
+            ll_vt_rcmd = c_vt_act * b * S / s_vt / FL
+
+            if delta_ht <= cfg_tail.tol_m and delta_vt <= cfg_tail.tol_m:
+                return TailSizingResult(
+                    s_ht_m2=float(s_ht),
+                    s_vt_m2=float(s_vt),
+                    b_ht_m=float(b_ht),
+                    b_vt_m=float(b_vt),
+                    l_ht_act_m=float(l_ht_act_m),
+                    l_vt_act_m=float(l_vt_act_m),
+                    x_true_ht_m=float(x_true_ht_mm) / 1000.0,
+                    x_true_vt_m=float(x_true_vt_mm) / 1000.0,
+                    c_ht_act=float(c_ht_act),
+                    c_vt_act=float(c_vt_act),
+                )
+
+            ll_ht = ll_ht_rcmd
+            ll_vt = ll_vt_rcmd
+            if wingpos == "fwd":
+                ll_ht = max(0.05, ll_ht)
+            elif wingpos == "aft":
+                ll_vt = max(0.05, ll_vt)
+            else:
+                ll_ht = max(min_tail_arm, ll_ht)
+                ll_vt = max(min_tail_arm, ll_vt)
+            k += 1
+
+            # Explicit convergence guard to avoid pathological loops.
+            if not math.isfinite(ll_ht) or not math.isfinite(ll_vt):
+                raise RuntimeError("Tail sizing diverged to non-finite values.")
+
+        raise RuntimeError(
+            f"Tail sizing did not converge in {cfg_tail.max_iter} iterations. "
+            f"Final deltas: HT={delta_ht:.3e}, VT={delta_vt:.3e}"
+        )
+
     def estimate(
         self,
         *,
@@ -1484,6 +1728,45 @@ class MassEstimator:
         swet_fus_m2 = float(conv.m2_ft2(swet_fus_ft2, "m2"))
 
         fuselage_length_m = float(conv.meter_feet(lfus_ft, "meter"))
+        croot_wing_m, _, _, _ = self._wing_planform_geometry(
+            S=wing_area_m2, b=wing_span_m, lamda=cfg.wing.taper
+        )
+
+        # -----------------
+        # Empirical tail geometry via TailCompu-style sizing
+        # -----------------
+        try:
+            tail_sizing = self._size_tails(
+                FL=fuselage_length_m,
+                S=wing_area_m2,
+                b=wing_span_m,
+                lamda=cfg.wing.taper,
+                cfg_tail=cfg.tail,
+            )
+            t_r_HT = 0.09
+            t_r_VT = 0.09 * 1.361
+            s_ht = tail_sizing.s_ht_m2
+            s_vt = tail_sizing.s_vt_m2
+            b_ht = tail_sizing.b_ht_m
+            b_vt = tail_sizing.b_vt_m
+            l_ht_act = tail_sizing.l_ht_act_m
+            l_vt_act = tail_sizing.l_vt_act_m
+            x_true_ht_m = tail_sizing.x_true_ht_m
+            x_true_vt_m = tail_sizing.x_true_vt_m
+        except Exception as exc:
+            logger.warning(
+                "Tail sizing fallback to legacy defaults due to: %s", exc
+            )
+            t_r_HT = 0.09
+            t_r_VT = 0.09 * 1.361
+            s_ht = 1.82
+            s_vt = 2.54
+            b_ht = 3.0
+            b_vt = 2.5
+            l_ht_act = float(conv.meter_feet(cfg.fuselage.lht_ft, "meter"))
+            l_vt_act = float(conv.meter_feet(cfg.fuselage.lht_ft, "meter"))
+            x_true_ht_m = l_ht_act
+            x_true_vt_m = l_vt_act
 
         # -----------------
         # Empirical weight estimation
@@ -1495,19 +1778,19 @@ class MassEstimator:
             b=wing_span_m,
             rho_a_cruise=self._rho_cr,
             v_cruise=self._v_cr_mps,
-            t_r_HT=0.09,
-            S_HT=1.82,
-            S_VT=2.54,
-            t_r_VT=0.09 * 1.361,
-            L_HT_act=float(conv.meter_feet(cfg.fuselage.lht_ft, "meter")),
-            b_HT=3.0,
-            b_VT=2.5,
+            t_r_HT=t_r_HT,
+            S_HT=s_ht,
+            S_VT=s_vt,
+            t_r_VT=t_r_VT,
+            L_HT_act=l_ht_act,
+            b_HT=b_ht,
+            b_VT=b_vt,
             FL=fuselage_length_m,
             Wf_mm=float(cfg.fuselage.dfus_m * 1000.0),
             hf_mm=float(cfg.fuselage.dfus_m * 1000.0),
             W_press=0.0,
             l_n_mm=float(conv.meter_feet(lnose_ft, "meter") * 1000.0),
-            Croot=1.5,
+            Croot=float(croot_wing_m),
             tc_r=cfg.wing.t_c,
             n_ult=cfg.wing.n_ult,
             Swet_fus=swet_fus_m2,
@@ -1632,6 +1915,14 @@ class MassEstimator:
             fuselage_length_m=float(fuselage_length_m),
             tank_length_m=float(tank_length_m),
             tank_volume_m3=float(tank_volume_m3),
+            s_ht_m2=float(s_ht),
+            s_vt_m2=float(s_vt),
+            b_ht_m=float(b_ht),
+            b_vt_m=float(b_vt),
+            l_ht_act_m=float(l_ht_act),
+            l_vt_act_m=float(l_vt_act),
+            x_true_ht_m=float(x_true_ht_m),
+            x_true_vt_m=float(x_true_vt_m),
             p_fuelcell_engine_w=float(p_fuelcell_engine_w),
             p_fuelcell_taxing_w=float(p_fuelcell_taxing_w),
             nacelle_design_power_kw_per_kg=float(nacelle_pd_kw_per_kg),
@@ -2933,6 +3224,12 @@ def _converged_summary_text(
         f"b_wing: {mass.wing_span_m:,.2f} m",
         f"Lfus: {mass.fuselage_length_m:,.2f} m",
         f"Ltank: {mass.tank_length_m:,.2f} m",
+        f"S_HT: {mass.s_ht_m2:,.2f} m^2",
+        f"S_VT: {mass.s_vt_m2:,.2f} m^2",
+        f"b_HT: {mass.b_ht_m:,.2f} m",
+        f"b_VT: {mass.b_vt_m:,.2f} m",
+        f"X_HT_act: {mass.x_true_ht_m:,.2f} m",
+        f"X_VT_act: {mass.x_true_vt_m:,.2f} m",
         f"Ptotal_climb: {phases['climb'].p_total_w/1000:,.0f} kW",
         f"Ptotal_cruise: {phases['cruise'].p_total_w/1000:,.0f} kW",
         f"Ptotal_takeoff: {phases['takeoff'].p_total_w/1000:,.0f} kW",
@@ -3036,6 +3333,14 @@ def _log_converged_state(
         f"MTOM={mtom:,.0f} kg | Powertrain={mass.m_powertrain_total_kg:,.0f} kg | "
         f"Tank={mass.m_tank_kg:,.1f} kg | Fuel={mass.m_fuel_kg:,.1f} kg | "
         f"Battery={mass.m_battery_kg:,.1f} kg | Nacelle power density={mass.nacelle_design_power_kw_per_kg:,.2f} kW/kg",
+    )
+    logger.info(
+        "  Geometry: "
+        f"Main wing area={mass.wing_area_m2:,.2f} m^2 | "
+        f"Horizontal tail area={mass.s_ht_m2:,.3f} m^2 | "
+        f"Horizontal tail location={mass.x_true_ht_m:,.3f} m | "
+        f"Vertical tail area={mass.s_vt_m2:,.3f} m^2 | "
+        f"Vertical tail location={mass.x_true_vt_m:,.3f} m",
     )
     logger.info(
         f"  Config: wing loading input={cfg.wing.wing_loading_kg_per_m2:,.2f} kg/m^2 | "
