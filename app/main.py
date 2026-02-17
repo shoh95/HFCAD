@@ -10,9 +10,11 @@ from __future__ import annotations
 
 import argparse
 import configparser
+import os
 import shutil
-import threading
+import subprocess
 import sys
+import tempfile
 
 import time
 import math
@@ -1825,6 +1827,12 @@ class HybridFuelCellAircraftDesign:
                 ptotal_guess["takeoff"] = phases["takeoff"].p_total_w
 
                 logger.info("\nCONVERGED")
+                _log_converged_state(
+                    state=f"MTOM iteration {outer_iter}",
+                    phases=phases,
+                    mass=mass,
+                    cfg=cfg,
+                )
                 return phases, mass
 
             # Early stop for likely infeasible closure:
@@ -2612,6 +2620,13 @@ class CoupledConstraintSizingRunner:
                         "error": "",
                     }
                 )
+                _log_converged_state(
+                    state=f"{stage} pass {pass_id} | W/S={dp.wing_loading_pa:,.1f} Pa ("
+                    f"{dp.wing_loading_kg_per_m2:.2f} kg/m^2)",
+                    phases=phases_i,
+                    mass=mass_i,
+                    cfg=cfg_i,
+                )
 
                 if best is None or mass_i.mtom_kg < best[0]:
                     best = (float(mass_i.mtom_kg), cfg_i, phases_i, mass_i, dp)
@@ -2727,31 +2742,45 @@ class OutputWriter:
             figs_dir = out_dir / "figs"
             figs_dir.mkdir(parents=True, exist_ok=True)
             save_path = figs_dir / "pemfc_fig.png"
-            write_error: List[Exception] = []
-            done = threading.Event()
-
-            def _save_image() -> None:
-                try:
-                    fig.write_image(str(save_path))
-                except Exception as e:  # pragma: no cover - runtime/tooling dependent
-                    write_error.append(e)
-                finally:
-                    done.set()
-
-            t = threading.Thread(target=_save_image, daemon=True)
-            t.start()
-            if not done.wait(timeout=float(timeout_s)):
-                logger.warning(
-                    "Skipping PEMFC figure export: timed out after %.1f s while writing %s",
-                    timeout_s,
-                    save_path,
-                )
-                return
-
-            if write_error:
-                raise write_error[0]
+            self._write_plotly_image_subprocess(fig=fig, save_path=save_path, timeout_s=timeout_s)
         except Exception as e:
             logger.warning("Could not generate PEMFC figure: %s", e)
+
+    @staticmethod
+    def _write_plotly_image_subprocess(*, fig: object, save_path: Path, timeout_s: float) -> None:
+        """Write Plotly image in a subprocess to isolate hard crashes (e.g., Qt/Kaleido aborts)."""
+
+        fig_json = fig.to_json()
+        with tempfile.TemporaryDirectory(prefix="hfcad-kaleido-") as td:
+            json_path = Path(td) / "figure.json"
+            json_path.write_text(fig_json, encoding="utf-8")
+
+            code = (
+                "import json, sys\n"
+                "import plotly.graph_objects as go\n"
+                "with open(sys.argv[1], 'r', encoding='utf-8') as f:\n"
+                "    fig_data = json.load(f)\n"
+                "fig = go.Figure(fig_data)\n"
+                "fig.write_image(sys.argv[2])\n"
+            )
+
+            env = os.environ.copy()
+            # Headless-safe default for Qt-backed image exporters.
+            env.setdefault("QT_QPA_PLATFORM", "offscreen")
+            proc = subprocess.run(
+                [sys.executable, "-c", code, str(json_path), str(save_path)],
+                capture_output=True,
+                text=True,
+                timeout=float(timeout_s),
+                env=env,
+            )
+
+            if proc.returncode != 0:
+                stderr = (proc.stderr or "").strip()
+                raise RuntimeError(
+                    f"subprocess image export failed (exit={proc.returncode})"
+                    + (f": {stderr}" if stderr else "")
+                )
 
     def write_mission_profile_outputs(
         self,
@@ -2763,7 +2792,12 @@ class OutputWriter:
     ) -> None:
         """Reproduce legacy mission power plot and Excel export."""
 
-        import matplotlib.pyplot as plt
+        if show_plot:
+            import matplotlib.pyplot as plt
+        else:
+            import matplotlib
+            matplotlib.use("Agg", force=True)
+            import matplotlib.pyplot as plt
 
         cfg = self._cfg
 
@@ -2903,7 +2937,7 @@ def _converged_summary_text(
         f"Ptotal_cruise: {phases['cruise'].p_total_w/1000:,.0f} kW",
         f"Ptotal_takeoff: {phases['takeoff'].p_total_w/1000:,.0f} kW",
         f"Pelectricnet: {phases['climb'].p_bus_required_w/1000:,.0f} kW",
-        f"Pcomp: {phases['climb'].p_comp_w/1000:,.0f} kW",
+        f"Pcomp: {phases['climb'].p_comp_w/1000:,.1f} kW",
         f"Pcoolingsystem: {phases['climb'].p_cooling_w/1000:,.0f} kW",
         f"Pnet: {pnet/1000:,.0f} kW",
         f"eta_pt: {cfg.eff.eta_em*cfg.eff.eta_pdu:,.4f}",
@@ -2961,6 +2995,55 @@ def _converged_summary_text(
     return "\n".join(lines)
 
 
+def _log_converged_state(
+    *,
+    state: str,
+    phases: Dict[str, PhasePowerResult],
+    mass: MassBreakdown,
+    cfg: DesignConfig,
+) -> None:
+    """Log a compact but actionable snapshot for a converged solution state."""
+
+    climb = phases["climb"]
+    cruise = phases["cruise"]
+    takeoff = phases.get("takeoff")
+    cruise_charger = phases.get("cruise_charger")
+
+    mtom = mass.mtom_kg
+    wing_loading = mass.mtom_kg / mass.wing_area_m2 if mass.wing_area_m2 > 0.0 else math.nan
+    p_to_w = climb.p_total_w / mtom if mtom > 0 else math.nan
+    takeoff_kw = takeoff.p_total_w / 1000.0 if takeoff is not None else math.nan
+    cruise_kw = cruise.p_total_w / 1000.0
+    climb_kw = climb.p_total_w / 1000.0
+    p_charger_kw = cruise_charger.p_total_w / 1000.0 if cruise_charger is not None else math.nan
+
+    logger.info("")
+    logger.info("CONVERGED STATE [%s]", state)
+    logger.info(
+        f"  MTOM={mtom:,.0f} kg | Wing loading={wing_loading:,.2f} kg/m^2 | P/W(climb)={p_to_w:,.2f} W/kg",
+    )
+    logger.info(
+        f"  Phase power: climb={climb_kw:,.1f} kW | cruise={cruise_kw:,.1f} kW | "
+        f"takeoff={takeoff_kw:,.1f} kW | cruise+charger={p_charger_kw:,.1f} kW",
+    )
+    logger.info(
+        f"  Power split (climb): FC={climb.p_fuelcell_w / 1000.0:,.1f} kW | "
+        f"Battery={climb.p_battery_w / 1000.0:,.1f} kW | Compressor={climb.p_comp_w / 1000.0:,.1f} kW | "
+        f"Cooling={climb.p_cooling_w / 1000.0:,.1f} kW | H2={climb.mdot_h2_kgps * 1000.0:,.3f} g/s",
+    )
+    logger.info(
+        "  Mass summary: "
+        f"MTOM={mtom:,.0f} kg | Powertrain={mass.m_powertrain_total_kg:,.0f} kg | "
+        f"Tank={mass.m_tank_kg:,.1f} kg | Fuel={mass.m_fuel_kg:,.1f} kg | "
+        f"Battery={mass.m_battery_kg:,.1f} kg | Nacelle power density={mass.nacelle_design_power_kw_per_kg:,.2f} kW/kg",
+    )
+    logger.info(
+        f"  Config: wing loading input={cfg.wing.wing_loading_kg_per_m2:,.2f} kg/m^2 | "
+        f"P/W TO/Cl/Cr={cfg.p_w.p_w_takeoff_kw_per_kg:,.5f}/{cfg.p_w.p_w_climb_kw_per_kg:,.5f}/"
+        f"{cfg.p_w.p_w_cruise_kw_per_kg:,.5f} kW/kg",
+    )
+
+
 def _print_summary(phases: Dict[str, PhasePowerResult], mass: MassBreakdown, cfg: DesignConfig) -> None:
     """Console report similar to the legacy script."""
 
@@ -3006,6 +3089,11 @@ def main(argv: Optional[List[str]] = None) -> None:
     )
 
     args = parser.parse_args(argv)
+
+    if not args.show_plot:
+        # Avoid Qt backend/plugin crashes in headless runs.
+        os.environ.setdefault("MPLBACKEND", "Agg")
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
     input_path = Path(args.input).expanduser()
     if args.write_template:

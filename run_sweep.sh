@@ -3,21 +3,30 @@ set -euo pipefail
 
 # ===== Cleanup on interrupt/termination =====
 cleanup() {
-  echo "[run_sweep] Caught signal, terminating child processes..." >&2
+  local _status=$?
+  local _main_py
+  if [[ "${_status}" -ne 0 ]]; then
+    echo "[run_sweep] Caught signal, terminating child processes..." >&2
+  fi
+  _main_py="$(basename "$MAIN_PY")"
+  if [[ -n "${ETA_PID:-}" ]]; then
+    kill "${ETA_PID}" 2>/dev/null || true
+  fi
   # Kill entire process group if possible
   if command -v pkill >/dev/null 2>&1; then
     pkill -P $$ 2>/dev/null || true
-    pkill -f "python .*app/main.py" 2>/dev/null || true
+    pkill -f "python .*${_main_py}" 2>/dev/null || true
     pkill -f "chrome|chromium|kaleido" 2>/dev/null || true
   fi
   # Hard kill leftover python/chrome if still alive
   if command -v pkill >/dev/null 2>&1; then
     pkill -9 -P $$ 2>/dev/null || true
-    pkill -9 -f "python .*app/main.py" 2>/dev/null || true
+    pkill -9 -f "python .*${_main_py}" 2>/dev/null || true
     pkill -9 -f "chrome|chromium|kaleido" 2>/dev/null || true
   fi
+  return "${_status}"
 }
-trap cleanup INT TERM
+trap cleanup INT TERM EXIT
 # ===========================================
 
 # =========================
@@ -33,7 +42,7 @@ MODE="${MODE:-seq}"          # seq | par
 JOBS="${JOBS:-4}"            # parallel workers when MODE=par
 TIMEOUT_SEC="${TIMEOUT_SEC:-0}"  # 0 = no timeout (requires coreutils timeout)
 
-LOG_ROOT="${LOG_ROOT:-${OUT_DIR}/_logs}"
+LOG_ROOT="${LOG_ROOT:-results/_logs}"
 STAMP="$(date +%Y%m%d-%H%M%S)"
 RUN_DIR="${RUN_DIR:-${LOG_ROOT}/run-${STAMP}}"
 
@@ -182,15 +191,26 @@ run_one() {
 
 
 
-  # Success criterion: artifact existence (non-empty recommended)
+  # Success criterion: artifact exists (non-empty). Some runs can finish sizing,
+  # write ConvergedData.txt, then fail later in plotting/GUI cleanup.
   if [[ -s "${artifact}" ]]; then
     echo "$(basename "$f")" >> "${OK_LIST}"
+    if [[ "$rc" -ne 0 ]]; then
+      {
+        echo
+        echo "[run_sweep] NOTE: command exited with ${rc}, but artifact exists. Treating as OK."
+        echo "[run_sweep] artifact: ${artifact}"
+      } >> "${log}"
+    fi
     return 0
   else
     echo "$(basename "$f")" >> "${FAIL_LIST}"
     {
       echo
       echo "[run_sweep] FAIL criteria: artifact not found or empty"
+      if [[ "$rc" -ne 0 ]]; then
+        echo "[run_sweep] command exit: ${rc}"
+      fi
       echo "[run_sweep] expected artifact: ${artifact}"
       echo "[run_sweep] exit code: ${rc}"
     } >> "${log}"
@@ -224,8 +244,12 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-LOG_ROOT="${OUT_DIR}/_logs"
-
+[[ "$JOBS" =~ ^[0-9]+$ ]] || die "Invalid jobs value: $JOBS"
+[[ "$TIMEOUT_SEC" =~ ^[0-9]+$ ]] || die "Invalid timeout value: $TIMEOUT_SEC"
+[[ "$ETA" =~ ^[01]$ ]] || die "Invalid eta value: $ETA"
+[[ "$ETA_INTERVAL_SEC" =~ ^[0-9]+$ ]] || die "Invalid eta interval value: $ETA_INTERVAL_SEC"
+[[ "$JOBS" -gt 0 ]] || die "Jobs must be >= 1"
+[[ "$ETA_INTERVAL_SEC" -gt 0 ]] || die "ETA interval must be >= 1"
 
 [[ -f "$MAIN_PY" ]] || die "main.py not found: $MAIN_PY"
 [[ -d "$IN_DIR" ]] || die "input dir not found: $IN_DIR"
@@ -240,7 +264,8 @@ fi
 
 # Collect inputs (stable order)
 shopt -s nullglob
-mapfile -t inputs < <(ls -1 "${IN_DIR}"/*.ini 2>/dev/null || true)
+inputs=( "${IN_DIR}"/*.ini )
+shopt -u nullglob
 [[ ${#inputs[@]} -gt 0 ]] || die "No .ini files found in: $IN_DIR"
 
 # Resume logic (optional): skip already OK from latest run (flexible sources)
@@ -256,7 +281,7 @@ if [[ $RESUME -eq 1 ]]; then
       if [[ -n "${RESUME_FROM_OUT}" ]]; then
           RESUME_LOG_ROOT="${RESUME_FROM_OUT}/_logs"
       fi
-      latest="$(ls -1dt "${RESUME_LOG_ROOT}"/run-* 2>/dev/null | head -n 1 || true)"
+      latest="$(find "${RESUME_LOG_ROOT}" -maxdepth 1 -mindepth 1 -type d -name 'run-*' -print | sort -r | head -n 1 || true)"
       [[ -n "${latest:-}" ]] || die "--resume requested but no previous run-* found"
       RESUME_OK_REF="${latest}/ok.list"
   fi
@@ -309,8 +334,6 @@ ETA_PID=""
 if [[ "${ETA}" == "1" ]]; then
   eta_monitor "${TOTAL_CASES}" "${start_ts}" &
   ETA_PID=$!
-  # Ensure monitor terminates on exit
-  trap '[[ -n "${ETA_PID}" ]] && kill "${ETA_PID}" 2>/dev/null || true' EXIT
 fi
 
 # =========================
@@ -370,4 +393,3 @@ if [[ "$fail_n" -gt 0 ]]; then
   echo "Some cases failed. Inspect logs in: $RUN_DIR"
   exit 3
 fi
-
