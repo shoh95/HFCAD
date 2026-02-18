@@ -815,8 +815,6 @@ def _coerce_value(raw: str, typ):
         if t in ("List[int]", "list[int]"):
             parts = [p.strip() for p in s.split(",") if p.strip() != ""]
             return [int(float(p)) for p in parts]
-        
-
     raw = raw.strip()
 
     # Strip quotes for simple string values
@@ -1896,7 +1894,10 @@ class MassEstimator:
             + Q_(float(climb.p_battery_w), "watt")
         )
         pem_w = (
-            (Q_(float(climb.p_fuelcell_w), "watt") * cfg.eff.eta_converter + Q_(float(climb.p_battery_w), "watt"))
+            (
+                Q_(float(climb.p_fuelcell_w), "watt") * cfg.eff.eta_converter
+                + Q_(float(climb.p_battery_w), "watt")
+            )
             * cfg.eff.eta_pdu
             * cfg.eff.eta_inverter
         )
@@ -3858,7 +3859,7 @@ def _print_summary(phases: Dict[str, PhasePowerResult], mass: MassBreakdown, cfg
 def _output_subdir_from_input(input_path: Path) -> str:
     stem = input_path.stem
     if stem.startswith("input_"):
-        return stem[len("input_") :]
+        return stem[len("input_"):]
     return stem
 
 
