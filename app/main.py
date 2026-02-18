@@ -28,7 +28,123 @@ import pandas as pd
 
 from ambiance import Atmosphere
 
-from Conversions import Conversions
+try:
+    from pint import UnitRegistry
+except ImportError as exc:  # pragma: no cover
+    raise ImportError(
+        "This project now uses the 'pint' units library (missing dependency).\n"
+        "Install it with:\n"
+        "  pip install pint\n"
+    ) from exc
+
+
+_ureg = UnitRegistry()
+Q_ = _ureg.Quantity
+_G0 = Q_(9.80665, "meter / second ** 2")
+_G0_MPS2 = float(_G0.to("meter / second ** 2").magnitude)
+
+# Ensure common aviation shorthand is available.
+# Pint usually includes 'knot' and 'nautical_mile', but some installations/older versions
+# may miss the 'kn'/'kt' aliases.
+try:  # pragma: no cover
+    _ureg.Unit("knot")
+except Exception:  # pragma: no cover
+    # Fallback definition from base units (1 kn = 1852 m / h).
+    _ureg.define("knot = 1852 * meter / hour")
+
+for _alias in ("kn", "kt"):
+    try:  # pragma: no cover
+        _ureg.Unit(_alias)
+    except Exception:  # pragma: no cover
+        try:
+            _ureg.define(f"{_alias} = knot")
+        except Exception:
+            pass
+
+class UnitConverter:
+    """Unit conversion helper backed by Pint.
+
+    The legacy code depended on a custom `Conversions` module. This wrapper keeps
+    the call sites readable while delegating all conversions to Pint.
+
+    All methods return *plain floats* (magnitudes) to stay compatible with the
+    existing numerical code paths.
+    """
+
+    def __init__(self, ureg: Optional["UnitRegistry"] = None):
+        self.ureg = ureg or _ureg
+
+    @staticmethod
+    def _norm_unit(unit: str) -> str:
+        return unit.strip().lower().replace(" ", "")
+
+    def meter_feet_q(self, value: float, out_unit: str):
+        """Convert between meters and feet.
+
+        Args:
+            value: numeric magnitude in the *input* unit implied by out_unit.
+            out_unit: 'ft' to treat input as meters and return feet;
+                      'meter'/'m' to treat input as feet and return meters.
+        """
+        out = self._norm_unit(out_unit)
+        if out in {"ft", "foot", "feet"}:
+            return (value * self.ureg.meter).to(self.ureg.foot)
+        if out in {"m", "meter", "metre"}:
+            return (value * self.ureg.foot).to(self.ureg.meter)
+        raise ValueError(f"meter_feet: unsupported output unit {out_unit!r}")
+
+    def meter_feet(self, value: float, out_unit: str) -> float:
+        return float(self.meter_feet_q(value, out_unit).magnitude)
+
+    def meter_inch_q(self, value: float, out_unit: str):
+        """Convert between meters and inches."""
+        out = self._norm_unit(out_unit)
+        if out in {"in", "inch", "inches"}:
+            return (value * self.ureg.meter).to(self.ureg.inch)
+        if out in {"m", "meter", "metre"}:
+            return (value * self.ureg.inch).to(self.ureg.meter)
+        raise ValueError(f"meter_inch: unsupported output unit {out_unit!r}")
+
+    def meter_inch(self, value: float, out_unit: str) -> float:
+        return float(self.meter_inch_q(value, out_unit).magnitude)
+
+    def m2_ft2_q(self, value: float, out_unit: str):
+        """Convert between square meters and square feet."""
+        out = self._norm_unit(out_unit)
+        if out in {"ft2", "ft^2", "ft**2", "sqft"}:
+            return (value * (self.ureg.meter ** 2)).to(self.ureg.foot ** 2)
+        if out in {"m2", "m^2", "m**2", "sqm"}:
+            return (value * (self.ureg.foot ** 2)).to(self.ureg.meter ** 2)
+        raise ValueError(f"m2_ft2: unsupported output unit {out_unit!r}")
+
+    def m2_ft2(self, value: float, out_unit: str) -> float:
+        return float(self.m2_ft2_q(value, out_unit).magnitude)
+
+    def kg_pound_q(self, value: float, out_unit: str):
+        """Convert between kilograms and pounds (avoirdupois mass)."""
+        out = self._norm_unit(out_unit)
+        if out in {"lb", "lbs", "pound", "pounds"}:
+            return (value * self.ureg.kilogram).to(self.ureg.pound)
+        if out in {"kg", "kilogram", "kilograms"}:
+            return (value * self.ureg.pound).to(self.ureg.kilogram)
+        raise ValueError(f"kg_pound: unsupported output unit {out_unit!r}")
+
+    def kg_pound(self, value: float, out_unit: str) -> float:
+        return float(self.kg_pound_q(value, out_unit).magnitude)
+
+    def km1h_kn_q(self, value: float, out_unit: str):
+        """Convert between km/h and knots."""
+        out = self._norm_unit(out_unit)
+        kmph = self.ureg.kilometer / self.ureg.hour
+
+        if out in {"kn", "knot", "knots", "kt", "kts"}:
+            return (value * kmph).to(self.ureg.knot)
+        if out in {"km/h", "kmh", "kmph"}:
+            return (value * self.ureg.knot).to(kmph)
+        raise ValueError(f"km1h_kn: unsupported output unit {out_unit!r}")
+
+    def km1h_kn(self, value: float, out_unit: str) -> float:
+        return float(self.km1h_kn_q(value, out_unit).magnitude)
 from Weight_Estimation import WeightEst
 
 from models.stack_functions import cell_model, stack_model, mass_flow_stack
@@ -187,7 +303,7 @@ class WingConfig:
     # Input-file units (new standard): kg/m^2 (mass-based wing loading).
     # Backward compatibility: if an input file provides wing_loading_pa, it will be
     # auto-converted to kg/m^2 (heuristic based on magnitude).
-    wing_loading_kg_per_m2: float = 2830.24 / 9.81
+    wing_loading_kg_per_m2: float = float((Q_(2830.24, "pascal") / _G0).to("kilogram / meter ** 2").magnitude)
     aspect_ratio: float = 10.0
     t_c: float = 0.20
 
@@ -281,7 +397,13 @@ class WeightsConfig:
     # Battery energy density (kWh/kg)
     rhobatt_kwh_per_kg: float = 0.30
 
-    # Battery mass reserve fraction used in legacy: mbatt = mbatt_old / (1 - reserve_fraction)
+    # Battery sizing mode:
+    #   - "fixed_time": use `battery_use_time_hr`
+    #   - "TO_Climb_only": sum battery energy for takeoff (fixed 1 min) + climb duration
+    battery_sizing_mode: str = "fixed_time"
+    battery_use_time_hr: float = 0.234
+
+    # Battery energy reserve fraction (kWh basis):
     battery_reserve_fraction: float = 0.25
 
 
@@ -600,7 +722,6 @@ def _normalize_p_w_section(section_dict: Dict[str, str]) -> Dict[str, str]:
         to avoid double-conversion when users update units but keep legacy key names.
     """
 
-    g = 9.81
     out = dict(section_dict)
 
     alias = {
@@ -621,7 +742,7 @@ def _normalize_p_w_section(section_dict: Dict[str, str]) -> Dict[str, str]:
         v = float(out[old_key])
         # Heuristic: W/N values are typically O(5~20). kW/kg is typically O(0.05~0.2).
         if v > 1.0:
-            v = v * g / 1000.0
+            v = float((Q_(v, "watt / newton") * _G0).to("kilowatt / kilogram").magnitude)
         out[new_key] = f"{v}"
         out.pop(old_key, None)
 
@@ -640,7 +761,6 @@ def _normalize_wing_section(section_dict: Dict[str, str]) -> Dict[str, str]:
         as kg/m^2 to avoid double-conversion.
     """
 
-    g = 9.81
     out = dict(section_dict)
 
     new_key = "wing_loading_kg_per_m2"
@@ -654,7 +774,7 @@ def _normalize_wing_section(section_dict: Dict[str, str]) -> Dict[str, str]:
         v = float(out[old_key])
         # Heuristic: Pa values for commuter-class wing loading are typically >1000.
         if v > 1000.0:
-            v = v / g
+            v = float((Q_(v, "pascal") / _G0).to("kilogram / meter ** 2").magnitude)
         out[new_key] = f"{v}"
         out.pop(old_key, None)
 
@@ -751,6 +871,54 @@ def _update_dataclass_from_section(default_obj, section_name: str, section) -> o
     return replace(default_obj, **updates) if updates else default_obj
 
 
+def _sync_legacy_flight_and_hydrogen_from_constraint_brief(
+    *,
+    flight: FlightConfig,
+    hydrogen: HydrogenConfig,
+    brief: ConstraintBriefConfig,
+) -> Tuple[FlightConfig, HydrogenConfig]:
+    """Map constraint brief inputs into legacy flight/hydrogen fields.
+
+    Source-of-truth mapping:
+      - flight.h_cr_m      <- constraint_brief.cruisealt_m
+      - flight.mach_cr     <- constraint_brief.cruisespeed_ktas (converted to Mach at cruise altitude)
+      - flight.h_takeoff_m <- constraint_brief.rwyelevation_m
+      - hydrogen.vv_mps    <- constraint_brief.climbrate_fpm (converted to m/s)
+    """
+
+    h_cr_m = float(brief.cruisealt_m)
+    h_takeoff_m = float(brief.rwyelevation_m)
+
+    v_cruise = Q_(float(brief.cruisespeed_ktas), "knot").to("meter / second")
+    v_cruise_mps = float(v_cruise.to("meter / second").magnitude)
+    if v_cruise_mps <= 0.0:
+        raise ValueError(
+            f"constraint_brief.cruisespeed_ktas must be > 0 to compute flight.mach_cr, got {brief.cruisespeed_ktas}."
+        )
+
+    a_cr_mps = float(Atmosphere(h_cr_m).speed_of_sound[0])
+    if a_cr_mps <= 0.0:
+        raise ValueError(f"Invalid speed of sound at constraint_brief.cruisealt_m={h_cr_m}.")
+    mach_cr = v_cruise_mps / a_cr_mps
+
+    climb_rate = Q_(float(brief.climbrate_fpm), "foot / minute").to("meter / second")
+    vv_mps = float(climb_rate.to("meter / second").magnitude)
+    if vv_mps <= 0.0:
+        raise ValueError(
+            f"constraint_brief.climbrate_fpm must be > 0 to compute hydrogen.vv_mps, got {brief.climbrate_fpm}."
+        )
+
+    return (
+        replace(
+            flight,
+            h_cr_m=float(h_cr_m),
+            mach_cr=float(mach_cr),
+            h_takeoff_m=float(h_takeoff_m),
+        ),
+        replace(hydrogen, vv_mps=float(vv_mps)),
+    )
+
+
 def load_design_config(input_path: Path) -> DesignConfig:
     """Load DesignConfig from an INI-style text file.
 
@@ -826,6 +994,14 @@ def load_design_config(input_path: Path) -> DesignConfig:
     )
     constraint_geometry = _update_dataclass_from_section(
         cfg_default.constraint_geometry, "constraint_geometry", section("constraint_geometry")
+    )
+
+    # Keep legacy fields synchronized from constraint_brief so one parameter set
+    # drives both ADRpy and the core flight-point sizing logic.
+    flight, hydrogen = _sync_legacy_flight_and_hydrogen_from_constraint_brief(
+        flight=flight,
+        hydrogen=hydrogen,
+        brief=constraint_brief,
     )
 
     # Top-level fields
@@ -1117,10 +1293,11 @@ class CoolingSystem:
         self._cfg = cfg
 
         # Legacy uses cruise ambient temperature to compute f_dT and then reuses it for all phases.
-        t_air = float(Atmosphere(cruise_altitude_m).temperature[0])
-        dT = float(cfg.dT_K)
+        t_air = Q_(float(Atmosphere(cruise_altitude_m).temperature[0]), "kelvin")
+        d_t = Q_(float(cfg.dT_K), "kelvin")
+        t_ratio = float((t_air / d_t).to("dimensionless").magnitude)
 
-        self._f_dT = 0.0038 * ((t_air / dT) ** 2) + 0.0352 * (t_air / dT) + 0.1817
+        self._f_dT = 0.0038 * (t_ratio**2) + 0.0352 * t_ratio + 0.1817
 
     def power_required_w(self, heat_rejected_kw: float) -> float:
         """Compute cooling system electrical power (W).
@@ -1131,7 +1308,9 @@ class CoolingSystem:
             Heat rejected (kW). This is consistent with legacy usage.
         """
 
-        return float((0.371 * heat_rejected_kw + 1.33) * self._f_dT * 1000.0)
+        heat_rejected = Q_(float(heat_rejected_kw), "kilowatt")
+        cooling_power = (0.371 * heat_rejected + Q_(1.33, "kilowatt")) * self._f_dT
+        return float(cooling_power.to("watt").magnitude)
 
 
 class FuelCellSystemModel:
@@ -1161,34 +1340,35 @@ class FuelCellSystemModel:
 
         # Atmospheric conditions
         atm = Atmosphere(flight_point.altitude_m)
-        c = float(atm.speed_of_sound[0])
-        v_cr = float(flight_point.mach * c)
-        p = float(atm.pressure[0])
-        p_tot = float(p * (1 + 0.4 / 2 * flight_point.mach**2) ** (1.4 / 0.4))
-        t = float(atm.temperature[0])
-        t_tot = float(t * (1 + 0.4 / 2 * flight_point.mach**2))
-        rho = float(atm.density[0])
-        mu = float(atm.dynamic_viscosity[0])
+        c = Q_(float(atm.speed_of_sound[0]), "meter / second")
+        v_cr = Q_(float(flight_point.mach), "dimensionless") * c
+        p = Q_(float(atm.pressure[0]), "pascal")
+        p_tot = p * (1 + 0.4 / 2 * flight_point.mach**2) ** (1.4 / 0.4)
+        t = Q_(float(atm.temperature[0]), "kelvin")
+        t_tot = t * (1 + 0.4 / 2 * flight_point.mach**2)
+        rho = Q_(float(atm.density[0]), "kilogram / meter ** 3")
+        mu = Q_(float(atm.dynamic_viscosity[0]), "pascal * second")
 
         if verbose:
             try:
-                logger.info(f"Reynolds_number: {rho * v_cr * 1.8 / mu:,.0f}")
+                reynolds = (rho * v_cr * Q_(1.8, "meter") / mu).to("dimensionless").magnitude
+                logger.info(f"Reynolds_number: {reynolds:,.0f}")
             except Exception:
                 pass
 
         # Other inputs
-        cell_temp = 273.15 + 80.0
+        cell_temp = Q_(273.15 + 80.0, "kelvin")
         mu_f = 0.95
 
         # Cathode inlet pressure
-        pres_cathode_in = float(beta * p_tot if comp_bool else p_tot)
+        pres_cathode_in = (beta * p_tot if comp_bool else p_tot).to("pascal")
 
         # Cell model (cached and optionally figure-producing)
-        pres_h = float(Atmosphere(0).pressure[0])
+        pres_h = Q_(float(Atmosphere(0).pressure[0]), "pascal")
         volt_cell, power_dens_cell, eta_cell, fig = cell_model(
-            pres_cathode_in,
-            pres_h,
-            cell_temp,
+            float(pres_cathode_in.magnitude),
+            float(pres_h.to("pascal").magnitude),
+            float(cell_temp.to("kelvin").magnitude),
             oversizing,
             make_fig=make_fig,
         )
@@ -1197,61 +1377,68 @@ class FuelCellSystemModel:
 
         # Compressor
         if comp_bool:
-            power_req_new = float(power_fc_sys_w)
-            power_comp = 0.0
+            power_req_new = Q_(float(power_fc_sys_w), "watt")
+            power_comp = Q_(0.0, "watt")
             geom_comp = None
-            rho_humid_in = rho
+            rho_humid_in = float(rho.to("kilogram / meter ** 3").magnitude)
             m_dot_comp = None
 
-            tol = max(float(comp_tol_w), 1e-6 * abs(power_req_new))
+            tol = max(float(comp_tol_w), 1e-6 * abs(float(power_req_new.to("watt").magnitude)))
 
             for _ in range(int(max_comp_iter)):
-                power_req = power_req_new
-                geom_comp, power_comp, rho_humid_in, m_dot_comp = compressor_performance_model(
+                power_req = float(power_req_new.to("watt").magnitude)
+                geom_comp, power_comp_w, rho_humid_in, m_dot_comp = compressor_performance_model(
                     power_req,
                     volt_cell,
                     float(beta),
-                    p_tot,
-                    t_tot,
-                    mu,
+                    float(p_tot.to("pascal").magnitude),
+                    float(t_tot.to("kelvin").magnitude),
+                    float(mu.to("pascal * second").magnitude),
                 )
-                power_req_new = float(power_fc_sys_w) + float(power_comp)
-                if abs(power_req_new - power_req) <= tol:
+                power_comp = Q_(float(power_comp_w), "watt")
+                power_req_new = Q_(float(power_fc_sys_w), "watt") + power_comp
+                if abs(float(power_req_new.to("watt").magnitude) - power_req) <= tol:
                     break
             else:
                 if verbose:
                     logger.warning(
                         "Compressor iteration hit max_comp_iter=%s (|ΔP|=%.3f W, tol=%.3f W).",
                         max_comp_iter,
-                        abs(power_req_new - power_req),
+                        abs(float(power_req_new.to("watt").magnitude) - power_req),
                         tol,
                     )
 
             m_comp = (
-                float(compressor_mass_model(geom_comp, power_comp, stl_path=self._comp_stl_path))
+                float(
+                    compressor_mass_model(
+                        geom_comp,
+                        float(power_comp.to("watt").magnitude),
+                        stl_path=self._comp_stl_path,
+                    )
+                )
                 if geom_comp is not None
                 else 0.0
             )
         else:
             m_comp = 0.0
-            power_comp = 0.0
-            power_req_new = float(power_fc_sys_w)
-            m_dot_comp = float(mass_flow_stack(power_req_new, volt_cell))
-            rho_humid_in = rho
+            power_comp = Q_(0.0, "watt")
+            power_req_new = Q_(float(power_fc_sys_w), "watt")
+            m_dot_comp = float(mass_flow_stack(float(power_req_new.to("watt").magnitude), volt_cell))
+            rho_humid_in = float(rho.to("kilogram / meter ** 3").magnitude)
 
         # Remaining BOP models
         m_humid = float(humidifier_model(m_dot_comp, rho_humid_in))
         q_all, m_hx, dim_hx = heat_exchanger_model(
-            power_req_new,
+            float(power_req_new.to("watt").magnitude),
             volt_cell,
-            cell_temp,
+            float(cell_temp.to("kelvin").magnitude),
             mu_f,
-            v_cr,
+            float(v_cr.to("meter / second").magnitude),
             float(flight_point.mach),
-            p_tot,
-            t_tot,
-            rho,
-            mu,
+            float(p_tot.to("pascal").magnitude),
+            float(t_tot.to("kelvin").magnitude),
+            float(rho.to("kilogram / meter ** 3").magnitude),
+            float(mu.to("pascal * second").magnitude),
         )
 
         # Stack model
@@ -1259,19 +1446,20 @@ class FuelCellSystemModel:
             self._arch.n_stacks_series,
             self._arch.volt_req_v,
             volt_cell,
-            power_req_new,
+            float(power_req_new.to("watt").magnitude),
             power_dens_cell,
         )
 
         # Aggregate
         m_sys = float(m_stacks + m_comp + m_humid + m_hx)
 
-        eta_fcsys = float(eta_cell * float(power_fc_sys_w) / (float(power_comp) + float(power_fc_sys_w)) * mu_f)
+        power_comp_w = float(power_comp.to("watt").magnitude)
+        eta_fcsys = float(eta_cell * float(power_fc_sys_w) / (power_comp_w + float(power_fc_sys_w)) * mu_f)
 
-        mdot_h2 = float(1.05e-8 * (float(power_comp) + float(power_fc_sys_w)) / volt_cell)
+        mdot_h2 = float(1.05e-8 * (power_comp_w + float(power_fc_sys_w)) / volt_cell)
 
         if verbose:
-            logger.info(f"Stack prop output power: {power_fc_sys_w/1000:,.0f} kW, Pcomp: {power_comp/1000:,.1f} kW")
+            logger.info(f"Stack prop output power: {power_fc_sys_w/1000:,.0f} kW, Pcomp: {power_comp_w/1000:,.1f} kW")
             logger.info(f"Cell efficiency: {eta_cell:,.3f}, Output efficiency: {eta_fcsys:,.3f}")
             logger.info(f"mdot_h2: {mdot_h2*1000:,.2f} g/s")
 
@@ -1283,9 +1471,9 @@ class FuelCellSystemModel:
             m_hx_kg=float(m_hx),
             eta_fcsys=float(eta_fcsys),
             mdot_h2_kgps=float(mdot_h2),
-            power_comp_w=float(power_comp),
+            power_comp_w=float(power_comp_w),
             q_all_w=float(q_all),
-            v_cr_mps=float(v_cr),
+            v_cr_mps=float(v_cr.to("meter / second").magnitude),
             dim_stack_m=(float(dim_stack[0]), float(dim_stack[1]), float(dim_stack[2])),
             dim_hx_m=(float(dim_hx[0]), float(dim_hx[1]), float(dim_hx[2])),
             res_stack=(float(res_stack[0]), float(res_stack[1])),
@@ -1321,32 +1509,29 @@ class PhasePowerSolver:
         initial_total_power_w: float,
         oversizing: float,
     ) -> PhasePowerResult:
-        """Fixed-point iteration for total electrical power including auxiliaries."""
+        """Fixed-point iteration for total electrical power (excluding cooling)."""
 
-        p_total = float(initial_total_power_w)
+        p_total = Q_(float(initial_total_power_w), "watt")
 
         for inner_iter in range(1, self._cfg.solver.max_inner_iter + 1):
             # New standard input: kW/kg
-            p_shaft = float(mtom_kg * p_w_kw_per_kg * 1000.0)
+            p_shaft = (Q_(float(mtom_kg), "kilogram") * Q_(float(p_w_kw_per_kg), "kilowatt / kilogram")).to("watt")
 
-            split = self._powertrain.split_shaft_power(p_shaft, psi)
-            p_bus_required = split.p_bus_required_w
+            split = self._powertrain.split_shaft_power(float(p_shaft.to("watt").magnitude), psi)
+            p_bus_required = Q_(float(split.p_bus_required_w), "watt")
 
             # Fuel-cell net electrical output used for per-nacelle sizing.
             #
-            # IMPORTANT:
-            # - size_nacelle(power_fc_sys_w=...) expects the **net** FC electrical output that goes to the propulsive bus
-            #   (it accounts for compressor parasitics internally via: power_req_new = power_fc_sys_w + power_comp).
-            # - Therefore, do NOT base this on p_total (which already includes compressor/cooling), or auxiliaries
-            #   get double-counted and p_total can inflate substantially (often ~2× in climb).
-            #
-            # Battery convention: p_battery_w > 0 discharge, p_battery_w < 0 charge.
-            # - Discharge: FC must provide only its share (subtract battery contribution).
-            # - Charge: FC must provide propulsion plus charging demand.
-            p_fc_sys_total = split.p_bus_required_w - max(split.p_battery_w, 0.0)
+            # Coupled fixed-point form:
+            # - p_total includes propulsion bus demand + compressor auxiliary.
+            # - when battery discharges (p_battery > 0), subtract that contribution.
+            # - when battery charges (p_battery < 0), charging demand is already represented
+            #   in p_total and must be supplied by FC.
+            p_fc_sys_total = float((p_total - Q_(max(float(split.p_battery_w), 0.0), "watt")).to("watt").magnitude)
 
             # Guardrail: ensure sizing power stays positive.
-            p_fc_sys_total = max(p_fc_sys_total, 1.0)
+            if p_fc_sys_total <= 0.0:
+                p_fc_sys_total = max(float(split.p_fuelcell_w), 1.0)
 
             p_fc_sys_per_nacelle = p_fc_sys_total / self._cfg.fuel_cell_arch.n_stacks_parallel
 
@@ -1360,24 +1545,29 @@ class PhasePowerSolver:
                 verbose=True,
             )
 
-            p_comp_total = nacelle.power_comp_w * self._cfg.fuel_cell_arch.n_stacks_parallel
-            heat_rejected_kw = (self._cfg.fuel_cell_arch.n_stacks_parallel * nacelle.q_all_w) / 1000.0
-            p_cooling = self._cooling.power_required_w(heat_rejected_kw)
+            p_comp_total = Q_(nacelle.power_comp_w * self._cfg.fuel_cell_arch.n_stacks_parallel, "watt")
+            heat_rejected = Q_(self._cfg.fuel_cell_arch.n_stacks_parallel * nacelle.q_all_w, "watt")
+            p_cooling = Q_(
+                self._cooling.power_required_w(float(heat_rejected.to("kilowatt").magnitude)),
+                "watt",
+            )
 
-            p_total_new = float(p_bus_required + p_comp_total + p_cooling)
+            # Per user requirement, total power excludes cooling load.
+            # Cooling is still computed and reported via p_cooling_w.
+            p_total_new = p_bus_required + p_comp_total
 
-            if abs(p_total_new - p_total) <= self._cfg.solver.power_tol_w:
+            if abs(float((p_total_new - p_total).to("watt").magnitude)) <= self._cfg.solver.power_tol_w:
                 return PhasePowerResult(
                     name=name,
                     mtom_kg=float(mtom_kg),
-                    p_shaft_w=float(p_shaft),
+                    p_shaft_w=float(p_shaft.to("watt").magnitude),
                     p_fuelcell_w=float(split.p_fuelcell_w),
                     p_battery_w=float(split.p_battery_w),
-                    p_bus_required_w=float(p_bus_required),
-                    p_comp_w=float(p_comp_total),
-                    p_cooling_w=float(p_cooling),
-                    p_total_w=float(p_total_new),
-                    heat_rejected_kw=float(heat_rejected_kw),
+                    p_bus_required_w=float(p_bus_required.to("watt").magnitude),
+                    p_comp_w=float(p_comp_total.to("watt").magnitude),
+                    p_cooling_w=float(p_cooling.to("watt").magnitude),
+                    p_total_w=float(p_total_new.to("watt").magnitude),
+                    heat_rejected_kw=float(heat_rejected.to("kilowatt").magnitude),
                     mdot_h2_kgps=float(nacelle.mdot_h2_kgps * self._cfg.fuel_cell_arch.n_stacks_parallel),
                     nacelle=nacelle,
                 )
@@ -1393,20 +1583,23 @@ class MassEstimator:
     def __init__(self, *, cfg: DesignConfig, comp_stl_path: Optional[Path] = None):
         self._cfg = cfg
         self._comp_stl_path = comp_stl_path
-        self._conv = Conversions()
+        self._conv = UnitConverter()
 
         # Pre-compute cruise environment
         atm_cr = Atmosphere(cfg.flight.h_cr_m)
-        self._c_cr_mps = float(atm_cr.speed_of_sound[0])
-        self._v_cr_mps = float(cfg.flight.mach_cr * self._c_cr_mps)
-        self._rho_cr = float(atm_cr.density[0])
+        self._c_cr = Q_(float(atm_cr.speed_of_sound[0]), "meter / second")
+        self._v_cr = Q_(float(cfg.flight.mach_cr), "dimensionless") * self._c_cr
+        self._v_cr_mps = float(self._v_cr.to("meter / second").magnitude)
+        self._rho_cr_q = Q_(float(atm_cr.density[0]), "kilogram / meter ** 3")
+        self._rho_cr = float(self._rho_cr_q.to("kilogram / meter ** 3").magnitude)
         self._beta_cruise, _ = _resolve_cruise_betas(
             cfg.fuel_cell_op.beta,
             cruise_density_kg_per_m3=self._rho_cr,
         )
 
         # Wing loading (mass-based) in kg/m^2
-        self._w_s_kg_per_m2 = float(cfg.wing.wing_loading_kg_per_m2)
+        self._w_s = Q_(float(cfg.wing.wing_loading_kg_per_m2), "kilogram / meter ** 2")
+        self._w_s_kg_per_m2 = float(self._w_s.to("kilogram / meter ** 2").magnitude)
 
     @property
     def v_cruise_mps(self) -> float:
@@ -1591,108 +1784,198 @@ class MassEstimator:
         mtom_guess_kg: float,
         climb: PhasePowerResult,
         cruise: PhasePowerResult,
+        takeoff: PhasePowerResult,
+        cruise_charger: Optional[PhasePowerResult] = None,
     ) -> MassBreakdown:
         cfg = self._cfg
         conv = self._conv
 
         # -----------------
-        # Fuel cell sizing at climb (design) power
+        # Fuel cell sizing at governing max-FC-power phase
         # -----------------
-        # Fuel-cell net output used for sizing (consistent with PhasePowerSolver).
-        power_fc_sys_total = climb.p_bus_required_w - max(climb.p_battery_w, 0.0)
-        power_fc_sys_total = max(power_fc_sys_total, 1.0)
+        sizing_phases = {
+            "takeoff": takeoff,
+            "climb": climb,
+            "cruise": cruise,
+        }
+        if cruise_charger is not None:
+            sizing_phases["cruise_charger"] = cruise_charger
+        nacelle_design_phase, nacelle_design_result, power_fc_sys_total = _max_phase_fc_sizing_power(sizing_phases)
+        power_fc_sys_total = max(float(power_fc_sys_total), 1.0)
         power_fc_sys_per_nacelle = power_fc_sys_total / cfg.fuel_cell_arch.n_stacks_parallel
 
-        nacelle_design = FuelCellSystemModel(
-            cfg.fuel_cell_arch,
-            comp_stl_path=self._comp_stl_path,
-        ).size_nacelle(
-            power_fc_sys_w=power_fc_sys_per_nacelle,
-            flight_point=FlightPoint(cfg.flight.h_cr_m, cfg.flight.mach_cr),
-            beta=self._beta_cruise,
-            oversizing=cfg.fuel_cell_op.oversizing,
-            comp_bool=True,
-            make_fig=False,
-            verbose=True,
+        logger.info(
+            "Fuel-cell system mass representative phase: %s (P_fc_sys=%.3f kW).",
+            nacelle_design_phase,
+            power_fc_sys_total / 1000.0,
         )
+        nacelle_design = nacelle_design_result.nacelle
 
-        # Mass per nacelle: use cruise-governing compressor mass for MTOM summation.
-        m_comp_cruise_per_nacelle = float(cruise.nacelle.m_comp_kg)
-        m_comp_climb_per_nacelle = float(climb.nacelle.m_comp_kg)
-        m_comp_max_per_nacelle = max(m_comp_cruise_per_nacelle, m_comp_climb_per_nacelle)
-        if m_comp_max_per_nacelle > m_comp_cruise_per_nacelle:
-            logger.warning(
-                "Compressor mass max is not at cruise (cruise=%.3f kg, climb=%.3f kg). "
-                "Using cruise compressor mass in MTOM summation.",
-                m_comp_cruise_per_nacelle,
-                m_comp_climb_per_nacelle,
-            )
-
+        # Mass per nacelle: use a single governing phase for stack/compressor/humidifier/HX.
         m_fc_system_per_nacelle = float(
             nacelle_design.m_stacks_kg
             + nacelle_design.m_humid_kg
-            + m_comp_cruise_per_nacelle
+            + nacelle_design.m_comp_kg
             + nacelle_design.m_hx_kg
         )
         m_fc_system = float(cfg.fuel_cell_arch.n_stacks_parallel * m_fc_system_per_nacelle)
 
         # -----------------
-        # Battery mass (legacy)
+        # Mission kinematics shared by battery sizing and fuel accounting
         # -----------------
-        # mbatt_old = (Pbat_climb * 0.234) / (rhobatt * 1000)
-        # mbatt = mbatt_old / (1 - reserve_fraction)
-        mbatt_old = (climb.p_battery_w * 0.234) / (cfg.weights.rhobatt_kwh_per_kg * 1000.0)
-        m_battery = float(mbatt_old / (1.0 - cfg.weights.battery_reserve_fraction))
+        brief = cfg.constraint_brief
+
+        climb_rate = Q_(float(brief.climbrate_fpm), "foot / minute").to("meter / second")
+        if float(climb_rate.to("meter / second").magnitude) <= 0.0:
+            raise ValueError(f"constraint_brief.climbrate_fpm must be > 0, got {brief.climbrate_fpm}.")
+
+        v_climb = Q_(float(brief.climbspeed_kias), "knot").to("meter / second")
+        v_cruise = Q_(float(brief.cruisespeed_ktas), "knot").to("meter / second")
+        if float(v_climb.to("meter / second").magnitude) <= 0.0:
+            raise ValueError(f"constraint_brief.climbspeed_kias must be > 0, got {brief.climbspeed_kias}.")
+        if float(v_cruise.to("meter / second").magnitude) <= 0.0:
+            raise ValueError(f"constraint_brief.cruisespeed_ktas must be > 0, got {brief.cruisespeed_ktas}.")
+
+        h_delta = Q_(max(float(brief.cruisealt_m) - float(brief.climbalt_m), 0.0), "meter")
+        t_climb = (h_delta / climb_rate).to("second")
+        r_climb = (v_climb * t_climb).to("meter")
+
+        # -----------------
+        # Battery mass
+        # -----------------
+        # mbatt_old = (Ebat_discharge) / rhobatt
+        # mbatt = mbatt_old * (1 + reserve_fraction)
+        p_battery_takeoff_discharge = Q_(max(float(takeoff.p_battery_w), 0.0), "watt")
+        p_battery_climb_discharge = Q_(max(float(climb.p_battery_w), 0.0), "watt")
+        rhobatt = Q_(float(cfg.weights.rhobatt_kwh_per_kg), "kilowatt_hour / kilogram")
+        if float(cfg.weights.battery_reserve_fraction) < 0.0:
+            raise ValueError(
+                f"weights.battery_reserve_fraction must be >= 0, got {cfg.weights.battery_reserve_fraction}."
+            )
+        battery_mode = str(cfg.weights.battery_sizing_mode).strip().lower()
+        if battery_mode in ("to_climb_only", "climb_only"):
+            # Backward compatible alias: legacy "climb_only" is accepted, but now
+            # battery sizing includes both takeoff and climb battery discharge energy.
+            t_takeoff = Q_(1.0, "minute").to("hour")
+            battery_discharge_energy = (
+                p_battery_takeoff_discharge * t_takeoff
+                + p_battery_climb_discharge * t_climb.to("hour")
+            )
+        elif battery_mode == "fixed_time":
+            if float(cfg.weights.battery_use_time_hr) < 0.0:
+                raise ValueError(f"weights.battery_use_time_hr must be >= 0, got {cfg.weights.battery_use_time_hr}.")
+            battery_use_time = Q_(float(cfg.weights.battery_use_time_hr), "hour")
+            battery_discharge_energy = p_battery_climb_discharge * battery_use_time
+        else:
+            raise ValueError(
+                "weights.battery_sizing_mode must be one of: "
+                "'TO_Climb_only', 'fixed_time'. "
+                f"Got {cfg.weights.battery_sizing_mode!r}."
+            )
+
+        m_battery = float(
+            (
+                battery_discharge_energy
+                * (1.0 + cfg.weights.battery_reserve_fraction)
+                / rhobatt
+            ).to("kilogram").magnitude
+        )
 
         # -----------------
         # PMAD and motor sizing (legacy)
         # -----------------
         # NOTE: legacy PPDU expression includes a thermal term (heat_rejected_kw) without unit conversion.
         # This is retained for backward compatibility.
-        ppdu_w = (climb.p_fuelcell_w + climb.heat_rejected_kw + climb.p_cooling_w) * cfg.eff.eta_converter + climb.p_battery_w
-        pem_w = (climb.p_fuelcell_w * cfg.eff.eta_converter + climb.p_battery_w) * cfg.eff.eta_pdu * cfg.eff.eta_inverter
+        ppdu_w = (
+            (
+                Q_(float(climb.p_fuelcell_w), "watt")
+                + Q_(float(climb.heat_rejected_kw), "watt")
+                + Q_(float(climb.p_cooling_w), "watt")
+            )
+            * cfg.eff.eta_converter
+            + Q_(float(climb.p_battery_w), "watt")
+        )
+        pem_w = (
+            (Q_(float(climb.p_fuelcell_w), "watt") * cfg.eff.eta_converter + Q_(float(climb.p_battery_w), "watt"))
+            * cfg.eff.eta_pdu
+            * cfg.eff.eta_inverter
+        )
 
-        m_e_motor = float(pem_w / cfg.densities.rhoem_w_per_kg)
-        m_pmad = float(ppdu_w / cfg.densities.rhopmad_w_per_kg)
+        m_e_motor = float((pem_w / Q_(float(cfg.densities.rhoem_w_per_kg), "watt / kilogram")).to("kilogram").magnitude)
+        m_pmad = float((ppdu_w / Q_(float(cfg.densities.rhopmad_w_per_kg), "watt / kilogram")).to("kilogram").magnitude)
 
         m_powertrain_total = float(m_fc_system + m_pmad + m_e_motor)
 
         # -----------------
         # Fuel mass and tank sizing
         # -----------------
-        # Range split (legacy)
-        t_climb_s = (cfg.flight.h_cr_m - cfg.hydrogen.h_to_m) / cfg.hydrogen.vv_mps
-        v_climb_mps = float(math.sqrt(cfg.hydrogen.vv_mps**2 + self._v_cr_mps**2))
-        r_climb_m = float(v_climb_mps * t_climb_s)
-        r_descent_m = r_climb_m
-        r_cruise_m = float(cfg.hydrogen.range_total_m - r_climb_m - r_descent_m)
+        # Mission timeline for fuel: ready(0), taxi(5 min), takeoff(1 min), climb(variable),
+        # cruise(variable), loiter(15 min, mdot=0.1*cruise mdot), landing(1 min, no fuel).
+        # This intentionally does not use cfg.mission.times_min.
+        t_ready = Q_(0.0, "minute").to("second")
+        t_taxi = Q_(5.0, "minute").to("second")
+        t_takeoff = Q_(1.0, "minute").to("second")
+        t_loiter = Q_(15.0, "minute").to("second")
+        t_landing = Q_(1.0, "minute").to("second")
 
-        mdot_cruise = float(cruise.mdot_h2_kgps)
-        mdot_climb = float(climb.mdot_h2_kgps)
+        mdot_climb = Q_(float(climb.mdot_h2_kgps), "kilogram / second")
+        mdot_cruise = Q_(float(cruise.mdot_h2_kgps), "kilogram / second")
+        mdot_takeoff = Q_(float(takeoff.mdot_h2_kgps), "kilogram / second")
+        mdot_taxi = 0.10 * mdot_climb
+        mdot_loiter = 0.10 * mdot_cruise
+        mdot_landing = Q_(0.0, "kilogram / second")
 
-        # Legacy uses v_cr from the FC sizing model; we use the precomputed cruise TAS.
-        m_fuel = float(
-            mdot_cruise * (r_cruise_m + r_descent_m) / self._v_cr_mps
-            + mdot_climb * (r_climb_m) / v_climb_mps
-        )
+        r_loiter = (v_cruise * t_loiter).to("meter")
+        range_total = Q_(float(cfg.hydrogen.range_total_m), "meter")
+        r_cruise = (range_total - r_climb - r_loiter).to("meter")
+        if float(r_cruise.to("meter").magnitude) < 0.0:
+            logger.warning(
+                "Total range %.1f km is smaller than climb+loiter range %.1f km. "
+                "Setting cruise segment to zero for fuel accounting.",
+                float(range_total.to("kilometer").magnitude),
+                float((r_climb + r_loiter).to("kilometer").magnitude),
+            )
+            r_cruise = Q_(0.0, "meter")
+        t_cruise = (r_cruise / v_cruise).to("second")
 
-        tank_volume_m3 = float(m_fuel * cfg.hydrogen.coversize / cfg.hydrogen.rho_h2_kg_m3 / cfg.hydrogen.eta_vol)
-        tank_length_m = float(tank_volume_m3 / (math.pi * (cfg.fuselage.dfus_m / 2.0) ** 2))
+        m_fuel = (
+            mdot_takeoff * t_takeoff
+            + mdot_climb * t_climb
+            + mdot_cruise * t_cruise
+            + mdot_loiter * t_loiter
+            + mdot_taxi * t_taxi
+            + mdot_landing * t_landing
+            + Q_(0.0, "kilogram / second") * t_ready
+        ).to("kilogram")
 
-        m_tank = float(m_fuel * cfg.hydrogen.coversize * (1.0 / cfg.hydrogen.eta_storage - 1.0))
+        tank_volume = (
+            m_fuel
+            * float(cfg.hydrogen.coversize)
+            / Q_(float(cfg.hydrogen.rho_h2_kg_m3), "kilogram / meter ** 3")
+            / float(cfg.hydrogen.eta_vol)
+        ).to("meter ** 3")
+        tank_length = (tank_volume / (math.pi * (Q_(float(cfg.fuselage.dfus_m), "meter") / 2.0) ** 2)).to("meter")
+
+        m_tank = (m_fuel * float(cfg.hydrogen.coversize) * (1.0 / float(cfg.hydrogen.eta_storage) - 1.0)).to("kilogram")
+        m_fuel_kg = float(m_fuel.to("kilogram").magnitude)
+        tank_volume_m3 = float(tank_volume.to("meter ** 3").magnitude)
+        tank_length_m = float(tank_length.to("meter").magnitude)
+        m_tank_kg = float(m_tank.to("kilogram").magnitude)
 
         # -----------------
         # Wing sizing (geometry)
         # -----------------
         # New standard input is wing loading in kg/m^2 (mass/area).
         # Use metric directly to avoid mixing force-based and mass-based definitions.
-        wing_area_m2 = float(mtom_guess_kg / self._w_s_kg_per_m2)
-        wing_span_m = float(math.sqrt(cfg.wing.aspect_ratio * wing_area_m2))
+        wing_area = (Q_(float(mtom_guess_kg), "kilogram") / self._w_s).to("meter ** 2")
+        wing_span = (float(cfg.wing.aspect_ratio) * wing_area) ** 0.5
+        wing_area_m2 = float(wing_area.to("meter ** 2").magnitude)
+        wing_span_m = float(wing_span.to("meter").magnitude)
 
         # -----------------
         # Fuselage sizing (geometry + wetted area)
         # -----------------
-        dfus_ft = float(conv.meter_feet(cfg.fuselage.dfus_m, "ft"))
+        dfus_ft = conv.meter_feet_q(cfg.fuselage.dfus_m, "ft")
         hfus_ft = dfus_ft
 
         # Nose/tail coefficients
@@ -1711,23 +1994,23 @@ class MassEstimator:
         else:
             k_c_used = k_c_nose
 
-        circum_fus_ft = float(2.0 * k_c_used * (dfus_ft + hfus_ft))
+        circum_fus_ft = (2.0 * k_c_used * (dfus_ft + hfus_ft)).to("foot")
 
-        lnose_ft = float(dfus_ft * cfg.fuselage.fnose)
-        ltail_ft = float(dfus_ft * cfg.fuselage.ftail)
+        lnose_ft = (dfus_ft * float(cfg.fuselage.fnose)).to("foot")
+        ltail_ft = (dfus_ft * float(cfg.fuselage.ftail)).to("foot")
 
         lcabin_m = float((cfg.fuselage.npass / cfg.fuselage.nseat_abreast) * cfg.fuselage.lseat_m + cfg.fuselage.ldoor_m)
-        lcabin_ft = float(conv.meter_feet(lcabin_m, "ft"))
+        lcabin_ft = conv.meter_feet_q(lcabin_m, "ft")
 
-        ltank_ft = float(conv.meter_feet(tank_length_m, "ft"))
-        lfus_ft = float(lnose_ft + ltail_ft + lcabin_ft + ltank_ft)
+        ltank_ft = tank_length.to("foot")
+        lfus_ft = (lnose_ft + ltail_ft + lcabin_ft + ltank_ft).to("foot")
 
-        swet_fus_ft2 = float(
+        swet_fus_ft2 = (
             circum_fus_ft * ((lcabin_ft + ltank_ft) + k_w_nose * lnose_ft + k_w_tail * ltail_ft)
-        )
-        swet_fus_m2 = float(conv.m2_ft2(swet_fus_ft2, "m2"))
+        ).to("foot ** 2")
+        swet_fus_m2 = float(swet_fus_ft2.to("meter ** 2").magnitude)
 
-        fuselage_length_m = float(conv.meter_feet(lfus_ft, "meter"))
+        fuselage_length_m = float(lfus_ft.to("meter").magnitude)
         croot_wing_m, _, _, _ = self._wing_planform_geometry(
             S=wing_area_m2, b=wing_span_m, lamda=cfg.wing.taper
         )
@@ -1789,7 +2072,7 @@ class MassEstimator:
             Wf_mm=float(cfg.fuselage.dfus_m * 1000.0),
             hf_mm=float(cfg.fuselage.dfus_m * 1000.0),
             W_press=0.0,
-            l_n_mm=float(conv.meter_feet(lnose_ft, "meter") * 1000.0),
+            l_n_mm=float(lnose_ft.to("meter").magnitude * 1000.0),
             Croot=float(croot_wing_m),
             tc_r=cfg.wing.t_c,
             n_ult=cfg.wing.n_ult,
@@ -1860,7 +2143,7 @@ class MassEstimator:
             W_TO=float(conv.kg_pound(mtom_guess_kg, "pound")),
             N_c=2,
             W_c=float(conv.kg_pound(10 * 19.0, "pound")),
-            S_f=float(swet_fus_ft2 * 23.0),
+            S_f=float(swet_fus_ft2.to("foot ** 2").magnitude * 23.0),
             N_pil=2,
         )
 
@@ -1877,8 +2160,8 @@ class MassEstimator:
             + w_furnishings
         )
 
-        oem = float(oem_misc + m_powertrain_total + m_tank + w_wing + w_fus + m_battery)
-        mtom = float(oem + m_fuel + cfg.weights.payload_kg)
+        oem = float(oem_misc + m_powertrain_total + m_tank_kg + w_wing + w_fus + m_battery)
+        mtom = float(oem + m_fuel_kg + cfg.weights.payload_kg)
 
         p_total_climb_w = float(climb.p_total_w)
         p_fuelcell_engine_w = float(p_total_climb_w * 0.05)
@@ -1892,8 +2175,8 @@ class MassEstimator:
             m_pmad_kg=float(m_pmad),
             m_e_motor_kg=float(m_e_motor),
             m_powertrain_total_kg=float(m_powertrain_total),
-            m_fuel_kg=float(m_fuel),
-            m_tank_kg=float(m_tank),
+            m_fuel_kg=float(m_fuel_kg),
+            m_tank_kg=float(m_tank_kg),
             m_battery_kg=float(m_battery),
             w_wing_kg=float(w_wing),
             w_fus_kg=float(w_fus),
@@ -2046,9 +2329,11 @@ class HybridFuelCellAircraftDesign:
             logger.info("======================================================")
             logger.info(f"======================= ITER {outer_iter} =======================")
 
-            # NOTE: For MTOM closure we only need the phases that drive the mass model
-            #       (climb for sizing, cruise for cruise-governing compressor mass).
-            #       takeoff / cruise_charger are computed once after MTOM converges.
+            # NOTE: MTOM closure uses cruise/climb/takeoff/cruise_charger:
+            #   - max FC-power phase among takeoff/climb/cruise/cruise_charger:
+            #     representative FC-system masses
+            #   - takeoff+climb: battery sizing (when weights.battery_sizing_mode=TO_Climb_only)
+            #   - takeoff: mission-timeline fuel accounting
 
             # Cruise (FC only -> psi = 0)
             phases["cruise"] = self._phase_solver.solve(
@@ -2076,10 +2361,38 @@ class HybridFuelCellAircraftDesign:
             )
             ptotal_guess["climb"] = phases["climb"].p_total_w
 
+            # Takeoff (needed for mission fuel accounting in mass closure)
+            phases["takeoff"] = self._phase_solver.solve(
+                name="takeoff",
+                mtom_kg=mtom,
+                p_w_kw_per_kg=cfg.p_w.p_w_takeoff_kw_per_kg,
+                flight_point=FlightPoint(cfg.flight.h_takeoff_m, cfg.flight.mach_takeoff),
+                psi=cfg.hybrid.psi_takeoff,
+                beta=1.05,
+                initial_total_power_w=ptotal_guess["takeoff"],
+                oversizing=cfg.fuel_cell_op.oversizing,
+            )
+            ptotal_guess["takeoff"] = phases["takeoff"].p_total_w
+
+            # Cruise with battery charging (included in representative FC mass phase search)
+            phases["cruise_charger"] = self._phase_solver.solve(
+                name="cruise_charger",
+                mtom_kg=mtom,
+                p_w_kw_per_kg=cfg.p_w.p_w_cruise_kw_per_kg,
+                flight_point=FlightPoint(cfg.flight.h_cr_m, cfg.flight.mach_cr),
+                psi=cfg.hybrid.psi_cruise_charger,
+                beta=self._beta_cruise_charger,
+                initial_total_power_w=ptotal_guess["cruise_charger"],
+                oversizing=cfg.fuel_cell_op.oversizing,
+            )
+            ptotal_guess["cruise_charger"] = phases["cruise_charger"].p_total_w
+
             mass = self._mass_estimator.estimate(
                 mtom_guess_kg=mtom,
                 climb=phases["climb"],
                 cruise=phases["cruise"],
+                takeoff=phases["takeoff"],
+                cruise_charger=phases["cruise_charger"],
             )
 
             residual = float(mass.mtom_kg - mtom)
@@ -2092,31 +2405,6 @@ class HybridFuelCellAircraftDesign:
             )
 
             if abs(residual) <= cfg.solver.mtom_tol_kg:
-                # Compute remaining phases at the converged MTOM (for reporting/exports)
-                phases["cruise_charger"] = self._phase_solver.solve(
-                    name="cruise_charger",
-                    mtom_kg=mtom,
-                    p_w_kw_per_kg=cfg.p_w.p_w_cruise_kw_per_kg,
-                    flight_point=FlightPoint(cfg.flight.h_cr_m, cfg.flight.mach_cr),
-                    psi=cfg.hybrid.psi_cruise_charger,
-                    beta=self._beta_cruise_charger,
-                    initial_total_power_w=ptotal_guess["cruise_charger"],
-                    oversizing=cfg.fuel_cell_op.oversizing,
-                )
-                ptotal_guess["cruise_charger"] = phases["cruise_charger"].p_total_w
-
-                phases["takeoff"] = self._phase_solver.solve(
-                    name="takeoff",
-                    mtom_kg=mtom,
-                    p_w_kw_per_kg=cfg.p_w.p_w_takeoff_kw_per_kg,
-                    flight_point=FlightPoint(cfg.flight.h_takeoff_m, cfg.flight.mach_takeoff),
-                    psi=cfg.hybrid.psi_takeoff,
-                    beta=1.05,
-                    initial_total_power_w=ptotal_guess["takeoff"],
-                    oversizing=cfg.fuel_cell_op.oversizing,
-                )
-                ptotal_guess["takeoff"] = phases["takeoff"].p_total_w
-
                 logger.info("\nCONVERGED")
                 _log_converged_state(
                     state=f"MTOM iteration {outer_iter}",
@@ -2329,8 +2617,6 @@ class HybridFuelCellAircraftDesign:
 # ADRpy coupling (constraint analysis)
 # ============================
 
-_G0_MPS2 = 9.80665
-
 
 @dataclass(frozen=True)
 class ADRpyDesignPoint:
@@ -2508,7 +2794,7 @@ class ADRpyConstraintAnalyzer:
         p_cruise *= margin
 
         ws_pa = float(wingloading_pa[idx])
-        ws_kgm2 = ws_pa / _G0_MPS2
+        ws_kgm2 = float((Q_(ws_pa, "pascal") / _G0).to("kilogram / meter ** 2").magnitude)
 
         return ADRpyDesignPoint(
             wing_loading_pa=ws_pa,
@@ -3081,7 +3367,7 @@ class OutputWriter:
         out_dir: Path,
         show_plot: bool = False,
     ) -> None:
-        """Reproduce legacy mission power plot and Excel export."""
+        """Write mission power plot/export using the phase-based mission timeline."""
 
         if show_plot:
             import matplotlib.pyplot as plt
@@ -3091,86 +3377,109 @@ class OutputWriter:
             import matplotlib.pyplot as plt
 
         cfg = self._cfg
+        brief = cfg.constraint_brief
 
-        # Legacy hybrid power allocation outputs
-        pfc_ready = mass.p_fuelcell_engine_w
-        pfc_taxing = mass.p_fuelcell_taxing_w
+        # Mission timeline (independent of cfg.mission.times_min):
+        # ready(0), taxi(5), takeoff(1), climb(variable), cruise(variable), loiter(15), landing(1).
+        climb_rate = Q_(float(brief.climbrate_fpm), "foot / minute").to("meter / second")
+        if float(climb_rate.to("meter / second").magnitude) <= 0.0:
+            raise ValueError(f"constraint_brief.climbrate_fpm must be > 0, got {brief.climbrate_fpm}.")
 
-        # Total (incl auxiliaries) FC power during phases
-        pfc_climb = phases["climb"].p_total_w - phases["climb"].p_battery_w
-        pbat_climb = phases["climb"].p_battery_w
+        v_climb = Q_(float(brief.climbspeed_kias), "knot").to("meter / second")
+        v_cruise = Q_(float(brief.cruisespeed_ktas), "knot").to("meter / second")
+        if float(v_climb.to("meter / second").magnitude) <= 0.0:
+            raise ValueError(f"constraint_brief.climbspeed_kias must be > 0, got {brief.climbspeed_kias}.")
+        if float(v_cruise.to("meter / second").magnitude) <= 0.0:
+            raise ValueError(f"constraint_brief.cruisespeed_ktas must be > 0, got {brief.cruisespeed_ktas}.")
 
-        pfc_takeoff = phases["takeoff"].p_total_w - phases["takeoff"].p_battery_w
-        pbat_takeoff = phases["takeoff"].p_battery_w
+        h_delta = Q_(max(float(brief.cruisealt_m) - float(brief.climbalt_m), 0.0), "meter")
+        t_climb = (h_delta / climb_rate).to("second")
+        r_climb = (v_climb * t_climb).to("meter")
 
-        pfc_cruise_charger = phases["cruise_charger"].p_total_w
-        pbat_charge = phases["cruise_charger"].p_battery_w
+        t_ready = Q_(0.0, "minute").to("second")
+        t_taxi = Q_(5.0, "minute").to("second")
+        t_takeoff = Q_(1.0, "minute").to("second")
+        t_loiter = Q_(15.0, "minute").to("second")
+        t_landing = Q_(1.0, "minute").to("second")
 
-        pfc_cruise = phases["cruise"].p_total_w
+        r_loiter = (v_cruise * t_loiter).to("meter")
+        range_total = Q_(float(cfg.hydrogen.range_total_m), "meter")
+        r_cruise = (range_total - r_climb - r_loiter).to("meter")
+        if float(r_cruise.to("meter").magnitude) < 0.0:
+            logger.warning(
+                "Total range %.1f km is smaller than climb+loiter range %.1f km. "
+                "Setting cruise segment to zero in mission profile output.",
+                float(range_total.to("kilometer").magnitude),
+                float((r_climb + r_loiter).to("kilometer").magnitude),
+            )
+            r_cruise = Q_(0.0, "meter")
+        t_cruise = (r_cruise / v_cruise).to("second")
 
-        logger.info(f"Pfuel_ready: {pfc_ready/1000:,.0f} kW, Pfuel_taxing: {pfc_taxing/1000:,.0f} kW, Pfuel_climb: {pfc_climb/1000:,.0f} kW, Pfuel_cruise: {pfc_cruise/1000:,.0f} kW, Pfuel_cruise_charger: {pfc_cruise_charger/1000:,.0f} kW, Pbat_climb: {pbat_climb/1000:,.0f} kW, Pbat_charge: {pbat_charge/1000:,.0f} kW")
+        pfc_ready = float(mass.p_fuelcell_engine_w)
+        pfc_taxi = float(mass.p_fuelcell_taxing_w)
+        pfc_takeoff = float(phases["takeoff"].p_total_w - phases["takeoff"].p_battery_w)
+        pbat_takeoff = float(phases["takeoff"].p_battery_w)
+        pfc_climb = float(phases["climb"].p_total_w - phases["climb"].p_battery_w)
+        pbat_climb = float(phases["climb"].p_battery_w)
+        pfc_cruise = float(phases["cruise"].p_total_w - phases["cruise"].p_battery_w)
+        pbat_cruise = float(phases["cruise"].p_battery_w)
+        pfc_loiter = 0.10 * max(pfc_cruise, 0.0)
+        pfc_landing = 0.0
 
-        power_fc = [
-            pfc_ready,
-            pfc_taxing,
-            pfc_takeoff,
-            pfc_climb,
-            pfc_climb,
-            pfc_cruise_charger,
-            pfc_cruise_charger,
-            pfc_cruise,
-            pfc_cruise,
-            pfc_taxing,
-            pfc_climb,
-            pfc_climb,
-            pfc_cruise,
-            pfc_cruise,
-            pfc_cruise,
-            pfc_cruise,
-            pfc_taxing,
-            pfc_taxing,
-            pfc_taxing,
-            pfc_ready,
-        ]
-        power_bat = [
-            0.0,
-            0.0,
-            pbat_takeoff,
-            pbat_climb,
-            pbat_climb,
-            pbat_charge,
-            pbat_charge,
-            0.0,
-            0.0,
-            0.0,
-            pbat_climb,
-            pbat_climb,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-        ]
+        phase_names = ["ready", "taxi", "takeoff", "climb", "cruise", "loiter", "landing"]
+        phase_durations_min = np.array(
+            [
+                float(t_ready.to("minute").magnitude),
+                float(t_taxi.to("minute").magnitude),
+                float(t_takeoff.to("minute").magnitude),
+                float(t_climb.to("minute").magnitude),
+                float(t_cruise.to("minute").magnitude),
+                float(t_loiter.to("minute").magnitude),
+                float(t_landing.to("minute").magnitude),
+            ],
+            dtype=float,
+        )
+        power_fc_w = np.array([pfc_ready, pfc_taxi, pfc_takeoff, pfc_climb, pfc_cruise, pfc_loiter, pfc_landing], dtype=float)
+        power_bat_w = np.array([0.0, 0.0, pbat_takeoff, pbat_climb, pbat_cruise, 0.0, 0.0], dtype=float)
 
-        x = np.array(cfg.mission.times_min, dtype=float)
-        y_bat_kw = np.array(power_bat, dtype=float) / 1000.0
-        y_fc_kw = np.array(power_fc, dtype=float) / 1000.0
-        y_total_kw = y_bat_kw + y_fc_kw
+        t_edges_min = np.concatenate(([0.0], np.cumsum(phase_durations_min)))
+        y_fc_kw = power_fc_w / 1000.0
+        y_bat_kw = power_bat_w / 1000.0
+        y_total_kw = y_fc_kw + y_bat_kw
+        y_fc_step_kw = np.append(y_fc_kw, y_fc_kw[-1])
+        y_bat_step_kw = np.append(y_bat_kw, y_bat_kw[-1])
+        y_total_step_kw = np.append(y_total_kw, y_total_kw[-1])
 
         # Plot
-        plt.plot(x, y_bat_kw, linestyle="solid", color="gray", label="Battery")
-        plt.plot(x, y_fc_kw, linestyle="dashed", color="orange", label="Fuel Cell")
-        plt.plot(x, y_total_kw, linestyle="solid", color="blue", label="Total")
+        plt.step(t_edges_min, y_bat_step_kw, where="post", linestyle="solid", color="gray", label="Battery")
+        plt.step(t_edges_min, y_fc_step_kw, where="post", linestyle="dashed", color="orange", label="Fuel Cell")
+        plt.step(t_edges_min, y_total_step_kw, where="post", linestyle="solid", color="blue", label="Total")
 
         plt.xlabel("Time(min)")
         plt.ylabel("Power(kW)")
-        plt.axis([0, 180, -200, 1400])
-        plt.title("Power Mission Profile")
+        phase_midpoints_min = 0.5 * (t_edges_min[:-1] + t_edges_min[1:])
+        phase_labels = ["Ready", "Taxing", "Takeoff", "Climb", "Loiter", "Landing"]
+        phase_tick_positions = np.array(
+            [
+                phase_midpoints_min[0],
+                phase_midpoints_min[1],
+                phase_midpoints_min[2],
+                phase_midpoints_min[3],
+                phase_midpoints_min[5],
+                phase_midpoints_min[6],
+            ],
+            dtype=float,
+        )
+        plt.xticks(phase_tick_positions, phase_labels, rotation=0, ha="center")
+        x_max = max(float(t_edges_min[-1]), 1.0)
+        y_max = max(10.0, float(np.max(np.maximum(y_total_step_kw, 0.0))) * 1.15)
+        y_min = min(-200.0, float(np.min(y_total_step_kw)) * 1.15)
+        plt.axis([0.0, x_max, y_min, y_max])
+        plt.title("Mission Profile (Required Power vs Time)")
         plt.legend(loc="upper right")
         plt.grid(True)
+        plt.tight_layout()
+        plt.subplots_adjust(bottom=0.20)
 
         out_dir.mkdir(parents=True, exist_ok=True)
         plt.savefig(str(out_dir / "Power Mission Profile.png"), dpi=400)
@@ -3179,9 +3488,19 @@ class OutputWriter:
         plt.close()
 
         # Excel export
-        req_pow = np.vstack([y_total_kw, y_fc_kw, y_bat_kw]).T
-        df = pd.DataFrame(req_pow, columns=["ReqPow_AC", "ReqPow_FC", "ReqPow_Batt"]).T
-        df.to_excel(str(out_dir / "ReqPowDATA.xlsx"), index=True)
+        # Excel export aligned with the new phase timeline.
+        df = pd.DataFrame(
+            {
+                "Phase": phase_names,
+                "Start_min": t_edges_min[:-1],
+                "End_min": t_edges_min[1:],
+                "Duration_min": phase_durations_min,
+                "ReqPow_AC_kW": y_total_kw,
+                "ReqPow_FC_kW": y_fc_kw,
+                "ReqPow_Batt_kW": y_bat_kw,
+            }
+        )
+        df.to_excel(str(out_dir / "ReqPowDATA.xlsx"), index=False)
 
     def write_converged_text(
         self,
@@ -3189,12 +3508,18 @@ class OutputWriter:
         phases: Dict[str, PhasePowerResult],
         mass: MassBreakdown,
         out_dir: Path,
+        execution_time_s: Optional[float] = None,
     ) -> None:
         """Write converged summary text to the output directory."""
 
         out_dir.mkdir(parents=True, exist_ok=True)
         summary_path = out_dir / "ConvergedData.txt"
-        summary_text = _converged_summary_text(phases=phases, mass=mass, cfg=self._cfg)
+        summary_text = _converged_summary_text(
+            phases=phases,
+            mass=mass,
+            cfg=self._cfg,
+            execution_time_s=execution_time_s,
+        )
         summary_path.write_text(summary_text + "\n", encoding="utf-8")
 
 
@@ -3207,19 +3532,177 @@ def _converged_summary_text(
     phases: Dict[str, PhasePowerResult],
     mass: MassBreakdown,
     cfg: DesignConfig,
+    execution_time_s: Optional[float] = None,
 ) -> str:
     """Converged summary used for console output and text export."""
 
+    def _fmt_kw(value_kw: float, width: int = 14) -> str:
+        if not math.isfinite(float(value_kw)):
+            return f"{'n/a':>{width}}"
+        return f"{float(value_kw):>{width},.1f}"
+
+    # Mission timing summary.
+    brief = cfg.constraint_brief
+    climb_rate = Q_(float(brief.climbrate_fpm), "foot / minute").to("meter / second")
+    v_climb = Q_(float(brief.climbspeed_kias), "knot").to("meter / second")
+    v_cruise = Q_(float(brief.cruisespeed_ktas), "knot").to("meter / second")
+    h_delta = Q_(max(float(brief.cruisealt_m) - float(brief.climbalt_m), 0.0), "meter")
+
+    t_climb = (h_delta / climb_rate).to("second")
+    r_climb = (v_climb * t_climb).to("meter")
+    t_ready = Q_(0.0, "minute").to("second")
+    t_taxi = Q_(5.0, "minute").to("second")
+    t_takeoff = Q_(1.0, "minute").to("second")
+    t_loiter = Q_(15.0, "minute").to("second")
+    t_landing = Q_(1.0, "minute").to("second")
+    r_loiter = (v_cruise * t_loiter).to("meter")
+    range_total = Q_(float(cfg.hydrogen.range_total_m), "meter")
+    r_cruise = (range_total - r_climb - r_loiter).to("meter")
+    if float(r_cruise.to("meter").magnitude) < 0.0:
+        r_cruise = Q_(0.0, "meter")
+    t_cruise = (r_cruise / v_cruise).to("second")
+
+    phase_times_min = {
+        "ready": float(t_ready.to("minute").magnitude),
+        "taxi": float(t_taxi.to("minute").magnitude),
+        "takeoff": float(t_takeoff.to("minute").magnitude),
+        "climb": float(t_climb.to("minute").magnitude),
+        "cruise": float(t_cruise.to("minute").magnitude),
+        "loiter": float(t_loiter.to("minute").magnitude),
+        "landing": float(t_landing.to("minute").magnitude),
+    }
+    climb_time_min = phase_times_min["climb"]
+    cruise_time_min = phase_times_min["cruise"]
+    total_flight_time_min = float(sum(phase_times_min.values()))
+
     pnet = phases["climb"].p_total_w * cfg.eff.eta_pdu * cfg.eff.eta_em
-    nac = phases["climb"].nacelle
-    comp_mass_report_kg = float(phases["cruise"].nacelle.m_comp_kg)
+    sizing_phase_name, sizing_phase, _ = _max_phase_fc_sizing_power(
+        {
+            name: phases[name]
+            for name in ("takeoff", "climb", "cruise", "cruise_charger")
+            if name in phases
+        }
+    )
+    nac = sizing_phase.nacelle
+    w_fcs_single_nacelle_kg = float(nac.m_stacks_kg + nac.m_comp_kg + nac.m_humid_kg + nac.m_hx_kg)
+    w_fcs_total_kg = float(w_fcs_single_nacelle_kg * cfg.fuel_cell_arch.n_stacks_parallel)
+    # w_motors_kg = float(mass.m_e_motor_kg * cfg.fuel_cell_arch.n_stacks_parallel)
+    w_motors_kg = float(mass.m_e_motor_kg)
+    w_powertrain_kg = float(w_fcs_total_kg + mass.m_pmad_kg + w_motors_kg)
+    oem_grouped_kg = float(
+        mass.w_wing_kg
+        + mass.w_ht_kg
+        + mass.w_vt_kg
+        + mass.w_fus_kg
+        + mass.w_lnd_main_kg
+        + mass.w_lnd_nose_kg
+        + mass.w_flight_control_kg
+        + mass.w_els_kg
+        + mass.w_iae_kg
+        + mass.w_hydraulics_kg
+        + mass.w_furnishings_kg
+    )
+    mtom_grouped_kg = float(
+        oem_grouped_kg + mass.m_tank_kg + mass.m_fuel_kg + mass.m_battery_kg + w_powertrain_kg + mass.payload_kg
+    )
     p_to_w_converged_w_per_kg = phases["climb"].p_total_w / mass.mtom_kg
     wing_loading_kg_per_m2 = mass.mtom_kg / mass.wing_area_m2
+    max_p_comp_phase, max_p_comp_w = _max_phase_comp_power(phases)
+
+    takeoff = phases.get("takeoff")
+    climb = phases.get("climb")
+    cruise = phases.get("cruise")
+
+    def _phase_row(
+        phase_name: str,
+        duration_min: float,
+        p_total_w: float,
+        p_fc_stack_w: float,
+        p_batt_w: float,
+        p_comp_w: float,
+        p_cooling_w: float,
+    ) -> str:
+        return (
+            f"{phase_name:<10} {duration_min:>9.2f}"
+            f"{_fmt_kw(p_total_w / 1000.0, 14)}"
+            f"{_fmt_kw(p_fc_stack_w / 1000.0, 16)}"
+            f"{_fmt_kw(p_batt_w / 1000.0, 14)}"
+            f"{_fmt_kw(p_comp_w / 1000.0, 17)}"
+            f"{_fmt_kw(p_cooling_w / 1000.0, 14)}"
+        )
+
+    cruise_total_w = float(cruise.p_total_w) if cruise is not None else math.nan
+    cruise_fc_w = float(cruise.p_fuelcell_w) if cruise is not None else math.nan
+    cruise_comp_w = float(cruise.p_comp_w) if cruise is not None else math.nan
+    cruise_cooling_w = float(cruise.p_cooling_w) if cruise is not None else math.nan
+
+    phase_rows = [
+        _phase_row("ready", phase_times_min["ready"], mass.p_fuelcell_engine_w, mass.p_fuelcell_engine_w, 0.0, 0.0, 0.0),
+        _phase_row("taxi", phase_times_min["taxi"], mass.p_fuelcell_taxing_w, mass.p_fuelcell_taxing_w, 0.0, 0.0, 0.0),
+        _phase_row(
+            "takeoff",
+            phase_times_min["takeoff"],
+            float(takeoff.p_total_w) if takeoff is not None else math.nan,
+            float(takeoff.p_fuelcell_w) if takeoff is not None else math.nan,
+            float(takeoff.p_battery_w) if takeoff is not None else math.nan,
+            float(takeoff.p_comp_w) if takeoff is not None else math.nan,
+            float(takeoff.p_cooling_w) if takeoff is not None else math.nan,
+        ),
+        _phase_row(
+            "climb",
+            phase_times_min["climb"],
+            float(climb.p_total_w) if climb is not None else math.nan,
+            float(climb.p_fuelcell_w) if climb is not None else math.nan,
+            float(climb.p_battery_w) if climb is not None else math.nan,
+            float(climb.p_comp_w) if climb is not None else math.nan,
+            float(climb.p_cooling_w) if climb is not None else math.nan,
+        ),
+        _phase_row(
+            "cruise",
+            phase_times_min["cruise"],
+            float(cruise.p_total_w) if cruise is not None else math.nan,
+            float(cruise.p_fuelcell_w) if cruise is not None else math.nan,
+            float(cruise.p_battery_w) if cruise is not None else math.nan,
+            float(cruise.p_comp_w) if cruise is not None else math.nan,
+            float(cruise.p_cooling_w) if cruise is not None else math.nan,
+        ),
+        _phase_row(
+            "loiter",
+            phase_times_min["loiter"],
+            0.10 * cruise_total_w if math.isfinite(cruise_total_w) else math.nan,
+            0.10 * cruise_fc_w if math.isfinite(cruise_fc_w) else math.nan,
+            0.0,
+            0.10 * cruise_comp_w if math.isfinite(cruise_comp_w) else math.nan,
+            0.10 * cruise_cooling_w if math.isfinite(cruise_cooling_w) else math.nan,
+        ),
+        _phase_row("landing", phase_times_min["landing"], 0.0, 0.0, 0.0, 0.0, 0.0),
+    ]
+    phase_header = (
+        "Phase      Time[min]     Total[kW]    FC Stack[kW]   Battery[kW]   Compressor[kW]   Cooling[kW]"
+    )
+    phase_rule = "-" * len(phase_header)
 
     lines = [
         "=============================================================",
         "========================= CONVERGED =========================",
         "=============================================================",
+        "",
+        "Mission Time",
+        f"Climb time: {climb_time_min:,.2f} min ({climb_time_min/60.0:,.2f} h)",
+        f"Cruise time: {cruise_time_min:,.2f} min ({cruise_time_min/60.0:,.2f} h)",
+        f"Total flight time: {total_flight_time_min:,.2f} min ({total_flight_time_min/60.0:,.2f} h)",
+        "",
+        "Phase Power Breakdown",
+        phase_header,
+        phase_rule,
+        *phase_rows,
+        "",
+        f"Pcomp_max (solved phases): {max_p_comp_w/1000:,.1f} kW ({max_p_comp_phase})",
+        f"Pnet (climb): {pnet/1000:,.0f} kW",
+        f"Pelectricnet (climb): {phases['climb'].p_bus_required_w/1000:,.0f} kW",
+        f"eta_pt: {cfg.eff.eta_em*cfg.eff.eta_pdu:,.4f}",
+        "",
+        "Geometry",
         f"S_wing: {mass.wing_area_m2:,.2f} m^2",
         f"b_wing: {mass.wing_span_m:,.2f} m",
         f"Lfus: {mass.fuselage_length_m:,.2f} m",
@@ -3230,54 +3713,54 @@ def _converged_summary_text(
         f"b_VT: {mass.b_vt_m:,.2f} m",
         f"X_HT_act: {mass.x_true_ht_m:,.2f} m",
         f"X_VT_act: {mass.x_true_vt_m:,.2f} m",
-        f"Ptotal_climb: {phases['climb'].p_total_w/1000:,.0f} kW",
-        f"Ptotal_cruise: {phases['cruise'].p_total_w/1000:,.0f} kW",
-        f"Ptotal_takeoff: {phases['takeoff'].p_total_w/1000:,.0f} kW",
-        f"Pelectricnet: {phases['climb'].p_bus_required_w/1000:,.0f} kW",
-        f"Pcomp: {phases['climb'].p_comp_w/1000:,.1f} kW",
-        f"Pcoolingsystem: {phases['climb'].p_cooling_w/1000:,.0f} kW",
-        f"Pnet: {pnet/1000:,.0f} kW",
-        f"eta_pt: {cfg.eff.eta_em*cfg.eff.eta_pdu:,.4f}",
         "",
-        "Per Nacelle",
+        f"One Nacelle (1/{cfg.fuel_cell_arch.n_stacks_parallel})",
         (
             f"Stack(1/{cfg.fuel_cell_arch.n_stacks_parallel}): {nac.m_stacks_kg:,.0f} kg, "
-            f"Compressor: {comp_mass_report_kg:,.0f} kg, Humidifier: {nac.m_humid_kg:,.0f} kg, HX: {nac.m_hx_kg:,.0f} kg"
+            f"Compressor: {nac.m_comp_kg:,.0f} kg, Humidifier: {nac.m_humid_kg:,.0f} kg, HX: {nac.m_hx_kg:,.0f} kg"
         ),
-        f"Power density of Nacelle System: {mass.nacelle_design_power_kw_per_kg:,.3f} kW/kg",
+        f"W_FCS_single_nacelle (W_Stack+W_Compressor+W_Humidifier+W_Hx): {w_fcs_single_nacelle_kg:,.0f} kg",
+        f"Representative FC phase: {sizing_phase_name}",
+        f"Specific Power of Nacelle System: {mass.nacelle_design_power_kw_per_kg:,.3f} kW/kg",
         f"dim_hx: dX={mass.nacelle_hx_dim_m[0]:,.3f} m, dY={mass.nacelle_hx_dim_m[1]:,.3f} m, dZ={mass.nacelle_hx_dim_m[2]:,.3f} m",
         f"dim_stack: dX={mass.nacelle_stack_dim_m[2]:,.3f} m, dY={mass.nacelle_stack_dim_m[0]:,.3f} m, dZ={mass.nacelle_stack_dim_m[1]:,.3f} m",
         "",
         "ALL Nacelles",
-        f"FCS(FC+Humidifier+Comp+Hx): {mass.m_fc_system_kg:,.0f} kg",
-        f"mPMAD: {mass.m_pmad_kg:,.0f} kg",
-        f"Electric Motors: {mass.m_e_motor_kg:,.0f} kg",
+        f"W_FCS_total: {w_fcs_total_kg:,.0f} kg",
+        f"W_PMAD: {mass.m_pmad_kg:,.0f} kg",
+        f"W_Motors: {w_motors_kg:,.0f} kg",
         "",
         "-----------------------",
-        f"Powertrain(FCS+PMAD+Motors): {mass.m_powertrain_total_kg:,.0f} kg",
-        f"mtank: {mass.m_tank_kg:,.0f} kg",
+        f"W_Powertrain (W_FCS_total+W_PMAD+W_Motors): {w_powertrain_kg:,.0f} kg",
+        "-----------------------",
         f"W_wing: {mass.w_wing_kg:,.0f} kg",
-        f"W_HT: {mass.w_ht_kg:,.0f} kg",
-        f"W_VT: {mass.w_vt_kg:,.0f} kg",
-        f"W_fus: {mass.w_fus_kg:,.0f} kg",
-        f"W_lndgearmain: {mass.w_lnd_main_kg:,.0f} kg",
-        f"W_lndgearnose: {mass.w_lnd_nose_kg:,.0f} kg",
-        f"W_motor: {mass.w_motor_misc_kg:,.0f} kg",
+        f"W_Htail: {mass.w_ht_kg:,.0f} kg",
+        f"W_Vtail: {mass.w_vt_kg:,.0f} kg",
+        f"W_fuselage: {mass.w_fus_kg:,.0f} kg",
+        f"W_lnd_gear_main: {mass.w_lnd_main_kg:,.0f} kg",
+        f"W_lnd_gear_nose: {mass.w_lnd_nose_kg:,.0f} kg",
         f"W_flight_control: {mass.w_flight_control_kg:,.0f} kg",
-        f"W_els: {mass.w_els_kg:,.0f} kg",
+        f"W_electric_system: {mass.w_els_kg:,.0f} kg",
         f"W_iae: {mass.w_iae_kg:,.0f} kg",
         f"W_hydraulics: {mass.w_hydraulics_kg:,.0f} kg",
         f"W_fur: {mass.w_furnishings_kg:,.0f} kg",
-        f"OEM: {mass.oem_kg:,.0f} kg",
-        f"OEMmisc: {mass.oem_misc_kg:,.0f} kg",
-        f"mfuel: {mass.m_fuel_kg:,.1f} kg",
-        f"mbatt: {mass.m_battery_kg:,.1f} kg",
-        f"mdot_H2(cruise): {phases['cruise'].mdot_h2_kgps*1000:,.1f} g/s",
         "-----------------------",
+        f"OEM: {oem_grouped_kg:,.0f} kg",
+        "-----------------------",
+        f"W_tank: {mass.m_tank_kg:,.0f} kg",
+        f"W_fuel: {mass.m_fuel_kg:,.1f} kg",
+        f"W_batt: {mass.m_battery_kg:,.1f} kg",
+        "-----------------------",
+        f"W_payload: {mass.payload_kg:,.0f} kg",
+        "-----------------------",
+        f"MTOM_grouped (OEM+W_tank+W_fuel+W_batt+W_Powertrain+W_payload): {mtom_grouped_kg:,.0f} kg",
         f"MTOM: {mass.mtom_kg:,.0f} kg",
-        f"Power-to-weight (converged): {p_to_w_converged_w_per_kg:,.2f} W/kg",
-        f"Wing loading (MTOM/S_wing): {wing_loading_kg_per_m2:,.2f} kg/m^2",
+        "-----------------------",
         "",
+        f"Wing loading (MTOM/S_wing): {wing_loading_kg_per_m2:,.2f} kg/m^2",
+        f"Power-to-weight (converged): {p_to_w_converged_w_per_kg:,.2f} W/kg",
+        "",
+        f"mdot_H2(cruise): {phases['cruise'].mdot_h2_kgps*1000:,.1f} g/s",
         f"Vtankex: {mass.tank_volume_m3:,.1f} m^3",
         "========================== END ==============================",
     ]
@@ -3289,6 +3772,8 @@ def _converged_summary_text(
             "-------------------------------------------------------------",
         ]
         lines = lines[:3] + hdr + lines[3:]
+    if execution_time_s is not None and math.isfinite(float(execution_time_s)):
+        lines[-1] = f"{lines[-1]} | Execution time: {float(execution_time_s):.1f} seconds"
     return "\n".join(lines)
 
 
@@ -3305,6 +3790,14 @@ def _log_converged_state(
     cruise = phases["cruise"]
     takeoff = phases.get("takeoff")
     cruise_charger = phases.get("cruise_charger")
+    max_p_comp_phase, max_p_comp_w = _max_phase_comp_power(phases)
+    fc_rep_phase_name, _, fc_rep_power_w = _max_phase_fc_sizing_power(
+        {
+            name: phases[name]
+            for name in ("takeoff", "climb", "cruise", "cruise_charger")
+            if name in phases
+        }
+    )
 
     mtom = mass.mtom_kg
     wing_loading = mass.mtom_kg / mass.wing_area_m2 if mass.wing_area_m2 > 0.0 else math.nan
@@ -3327,6 +3820,12 @@ def _log_converged_state(
         f"  Power split (climb): FC={climb.p_fuelcell_w / 1000.0:,.1f} kW | "
         f"Battery={climb.p_battery_w / 1000.0:,.1f} kW | Compressor={climb.p_comp_w / 1000.0:,.1f} kW | "
         f"Cooling={climb.p_cooling_w / 1000.0:,.1f} kW | H2={climb.mdot_h2_kgps * 1000.0:,.3f} g/s",
+    )
+    logger.info(
+        f"  Compressor max across phases: {max_p_comp_w / 1000.0:,.1f} kW ({max_p_comp_phase})",
+    )
+    logger.info(
+        f"  FC representative phase (mass sizing): {fc_rep_phase_name} ({fc_rep_power_w / 1000.0:,.1f} kW)",
     )
     logger.info(
         "  Mass summary: "
@@ -3363,8 +3862,35 @@ def _output_subdir_from_input(input_path: Path) -> str:
     return stem
 
 
-def main(argv: Optional[List[str]] = None) -> None:
+def _phase_fc_sizing_power_w(phase: PhasePowerResult) -> float:
+    """Return FC net electrical power used for nacelle sizing in a phase."""
+
+    return float(phase.p_total_w) - max(float(phase.p_battery_w), 0.0)
+
+
+def _max_phase_fc_sizing_power(
+    phases: Dict[str, PhasePowerResult],
+) -> Tuple[str, PhasePowerResult, float]:
+    """Return phase name, phase result, and FC sizing power (W) at the maximum."""
+
+    if not phases:
+        raise ValueError("At least one phase is required to select FC sizing representative phase.")
+    phase_name, phase = max(phases.items(), key=lambda item: _phase_fc_sizing_power_w(item[1]))
+    return phase_name, phase, _phase_fc_sizing_power_w(phase)
+
+
+def _max_phase_comp_power(phases: Dict[str, PhasePowerResult]) -> Tuple[str, float]:
+    """Return phase name and value for maximum compressor power."""
+
+    if not phases:
+        return "n/a", math.nan
+    phase_name, phase = max(phases.items(), key=lambda item: float(item[1].p_comp_w))
+    return phase_name, float(phase.p_comp_w)
+
+
+def main(argv: Optional[List[str]] = None) -> Optional[float]:
     logging.basicConfig(level=logging.INFO, format="%(message)s")
+    start_time = time.perf_counter()
 
     default_input = Path(__file__).with_name("input_HFCAD.txt")
 
@@ -3404,7 +3930,7 @@ def main(argv: Optional[List[str]] = None) -> None:
     if args.write_template:
         write_input_template(input_path, DesignConfig())
         logger.info("Wrote template input file: %s", input_path)
-        return
+        return None
 
     if not input_path.exists():
         raise FileNotFoundError(
@@ -3434,7 +3960,6 @@ def main(argv: Optional[List[str]] = None) -> None:
     _print_summary(phases, mass, cfg_used)
 
     writer = OutputWriter(cfg_used)
-    writer.write_converged_text(phases=phases, mass=mass, out_dir=out_dir)
 
     # Fuel cell figure (per nacelle at design point)
     nacelle_power_w = phases["climb"].p_total_w / cfg_used.fuel_cell_arch.n_stacks_parallel
@@ -3447,13 +3972,19 @@ def main(argv: Optional[List[str]] = None) -> None:
         out_dir=out_dir,
         show_plot=bool(args.show_plot),
     )
+    elapsed_time = time.perf_counter() - start_time
+    writer.write_converged_text(
+        phases=phases,
+        mass=mass,
+        out_dir=out_dir,
+        execution_time_s=elapsed_time,
+    )
+    return elapsed_time
 
 
 if __name__ == "__main__":
-    start_time = time.perf_counter()
-    main()
-    end_time = time.perf_counter()
-    elapsed_time = end_time - start_time
-    print("\n\n=============================================================")
-    print(f'Execution time: {elapsed_time:.1f} seconds')
-    print("=============================================================")
+    elapsed_time = main()
+    if elapsed_time is not None:
+        print("\n\n=============================================================")
+        print(f"Execution time: {elapsed_time:.1f} seconds")
+        print("=============================================================")

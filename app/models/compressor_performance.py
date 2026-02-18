@@ -126,16 +126,25 @@ def compressor_performance_model(power_req, volt_cell, beta, p1, t1, mu1, n=1000
     sf = 0.1
     sf_new = 1
     nbr, beta2b = 1, 1
-    while abs(sf-sf_new)/sf > 0.01:
+    sf_tol = 0.01
+    max_sf_iter = 200
+    for _ in range(max_sf_iter):
+        if abs(sf - sf_new) / max(abs(sf), 1e-12) <= sf_tol:
+            break
         sf = sf_new
         beta2b = atan(1/(xi*phi) - tan(alpha2/sf))
         betam = (beta1m + beta2b)/2
-        nbr = int((2*pi*cos(betam))/(0.4*log(1/dt)))
+        nbr = max(1, int((2*pi*cos(betam))/(0.4*log(1/dt))))
         sf_int = 1 - sqrt(cos(beta2b))/nbr**0.7
         sf_new = (sf + sf_int)/2
         # if d1m / d2 > (sf - sf_s) / (1 - sf_s):
         #    warnings.warn("Rotor mean diameter ratio too high")
         # print(sf_new)
+    else:
+        warnings.warn(
+            "Compressor slip-factor iteration hit max iterations; using last iterate.",
+            RuntimeWarning,
+        )
 
     s1r = pi * (d1t + d1h) / (2 * nbr)  # rotor inlet blade pitch
     s2r = pi * d2 / nbr  # rotor outlet blade pitch
