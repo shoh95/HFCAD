@@ -1852,7 +1852,8 @@ class MassEstimator:
         if float(v_cruise.to("meter / second").magnitude) <= 0.0:
             raise ValueError(f"constraint_brief.cruisespeed_ktas must be > 0, got {brief.cruisespeed_ktas}.")
 
-        h_delta = Q_(max(float(brief.cruisealt_m) - float(brief.climbalt_m), 0.0), "meter")
+        # Use runway elevation as mission climb start altitude; climbalt_m is the constraint evaluation altitude.
+        h_delta = Q_(max(float(brief.cruisealt_m) - float(brief.rwyelevation_m), 0.0), "meter")
         t_climb = (h_delta / climb_rate).to("second")
         r_climb = (v_climb * t_climb).to("meter")
 
@@ -3629,7 +3630,8 @@ class OutputWriter:
         if float(v_cruise.to("meter / second").magnitude) <= 0.0:
             raise ValueError(f"constraint_brief.cruisespeed_ktas must be > 0, got {brief.cruisespeed_ktas}.")
 
-        h_delta = Q_(max(float(brief.cruisealt_m) - float(brief.climbalt_m), 0.0), "meter")
+        # Use runway elevation as mission climb start altitude; climbalt_m is the constraint evaluation altitude.
+        h_delta = Q_(max(float(brief.cruisealt_m) - float(brief.rwyelevation_m), 0.0), "meter")
         t_climb = (h_delta / climb_rate).to("second")
         r_climb = (v_climb * t_climb).to("meter")
 
@@ -4248,7 +4250,8 @@ def _converged_summary_text(
     v_cruise = Q_(float(brief.cruisespeed_ktas), "knot").to("meter / second")
     loiter_speed_ratio = _resolve_loiter_speed_ratio(cfg.flight.loiter_speed_ratio_to_cruise)
     v_loiter = loiter_speed_ratio * v_cruise
-    h_delta = Q_(max(float(brief.cruisealt_m) - float(brief.climbalt_m), 0.0), "meter")
+    # Use runway elevation as mission climb start altitude; climbalt_m is the constraint evaluation altitude.
+    h_delta = Q_(max(float(brief.cruisealt_m) - float(brief.rwyelevation_m), 0.0), "meter")
 
     t_climb = (h_delta / climb_rate).to("second")
     r_climb = (v_climb * t_climb).to("meter")
