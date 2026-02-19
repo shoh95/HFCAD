@@ -2743,6 +2743,35 @@ class ADRpyConstraintAnalyzer:
         j = int(np.nanargmin(sub))
         return int(idxs[j])
 
+    def curve_minima_kw_per_kg(
+        self,
+        *,
+        wingloading_pa: np.ndarray,
+        curves: Dict[str, np.ndarray],
+        wsmax_cleanstall_pa: Optional[float],
+    ) -> Dict[str, Dict[str, float]]:
+        """Return per-curve minimum P/W points over finite + stall-feasible W/S."""
+
+        minima: Dict[str, Dict[str, float]] = {}
+        for key, raw_curve in curves.items():
+            curve = np.asarray(raw_curve, dtype=float)
+            valid = np.isfinite(curve)
+            if wsmax_cleanstall_pa is not None:
+                valid &= wingloading_pa <= float(wsmax_cleanstall_pa)
+            idxs = np.where(valid)[0]
+            if idxs.size == 0:
+                continue
+            i_min = self._select_index_min(curve, valid_mask=valid)
+            ws_pa = float(wingloading_pa[i_min])
+            ws_kgm2 = float((Q_(ws_pa, "pascal") / _G0).to("kilogram / meter ** 2").magnitude)
+            minima[str(key)] = {
+                "idx": float(i_min),
+                "wing_loading_pa": ws_pa,
+                "wing_loading_kg_per_m2": ws_kgm2,
+                "p_w_kw_per_kg": float(curve[i_min]),
+            }
+        return minima
+
     def select_design_point_min_combined_pw(
         self,
         *,
@@ -2862,10 +2891,102 @@ class CoupledConstraintSizingRunner:
         out_dir: Optional[Path],
     ) -> Tuple[DesignConfig, Dict[str, PhasePowerResult], MassBreakdown, Optional[pd.DataFrame]]:
         cfg = self._cfg
-        ws_grid = self._wingloading_grid_pa()
+        cs = cfg.constraint_sizing
+        ws_step_pa = float(cs.ws_step_pa)
+        ws_scan_min_pa = float(cs.ws_min_pa)
+        ws_scan_max_pa = float(cs.ws_max_pa)
+        if ws_step_pa <= 0.0:
+            raise ValueError("constraint_sizing.ws_step_pa must be > 0")
+        if ws_scan_max_pa <= ws_scan_min_pa:
+            raise ValueError("constraint_sizing.ws_max_pa must be > ws_min_pa")
+        auto_widen_enable = bool(cs.ws_auto_widen_enable)
+        auto_widen_factor = float(cs.ws_auto_widen_factor)
+        auto_widen_max_passes = max(0, int(cs.ws_auto_widen_max_passes))
+        if auto_widen_enable and auto_widen_factor <= 1.0:
+            logger.warning(
+                "ws_auto_widen_enable=True but ws_auto_widen_factor<=1.0; disabling auto-widen.",
+            )
+            auto_widen_enable = False
 
-        dp, curves, wsmax_cleanstall_pa = self._adr.select_design_point_min_combined_pw(
-            wingloading_pa=ws_grid, mtom_kg=float(cfg.initial_mtom_kg)
+        def _wingloading_grid_from_bounds(*, ws_min_pa: float, ws_max_pa: float) -> np.ndarray:
+            if ws_max_pa <= ws_min_pa:
+                raise ValueError("constraint_sizing.ws_max_pa must be > ws_min_pa")
+            n = int(math.floor((ws_max_pa - ws_min_pa) / ws_step_pa)) + 1
+            grid = ws_min_pa + ws_step_pa * np.arange(max(1, n), dtype=float)
+            if grid[-1] < ws_max_pa - 1e-9:
+                grid = np.append(grid, ws_max_pa)
+            return np.asarray(grid, dtype=float)
+
+        seed_expand_pass = 0
+        ws_grid = np.asarray([], dtype=float)
+        dp: ADRpyDesignPoint
+        curves: Dict[str, np.ndarray]
+        wsmax_cleanstall_pa: Optional[float] = None
+        while True:
+            ws_grid = _wingloading_grid_from_bounds(ws_min_pa=ws_scan_min_pa, ws_max_pa=ws_scan_max_pa)
+            dp, curves, wsmax_cleanstall_pa = self._adr.select_design_point_min_combined_pw(
+                wingloading_pa=ws_grid, mtom_kg=float(cfg.initial_mtom_kg)
+            )
+            combined = np.asarray(curves.get("combined"), dtype=float)
+            valid = np.isfinite(combined)
+            if wsmax_cleanstall_pa is not None:
+                valid &= ws_grid <= float(wsmax_cleanstall_pa)
+            idxs = np.where(valid)[0]
+            if idxs.size == 0:
+                raise RuntimeError("No feasible W/S points for selection='min_combined_pw'.")
+
+            ws_feasible = np.asarray(ws_grid[idxs], dtype=float)
+            ws_feasible_min = float(np.min(ws_feasible))
+            ws_feasible_max = float(np.max(ws_feasible))
+
+            ws_tol_pa = max(1e-9, 0.51 * ws_step_pa)
+            touches_lower = math.isclose(ws_feasible_min, ws_scan_min_pa, abs_tol=ws_tol_pa)
+            touches_upper = math.isclose(ws_feasible_max, ws_scan_max_pa, abs_tol=ws_tol_pa)
+            seed_on_boundary = (
+                math.isclose(dp.wing_loading_pa, ws_feasible_min, abs_tol=ws_tol_pa)
+                or math.isclose(dp.wing_loading_pa, ws_feasible_max, abs_tol=ws_tol_pa)
+            )
+            should_widen = (
+                auto_widen_enable
+                and seed_expand_pass < auto_widen_max_passes
+                and (touches_lower or touches_upper or seed_on_boundary)
+            )
+            if not should_widen:
+                if seed_on_boundary:
+                    logger.warning(
+                        "ADRpy minimum combined P/W remains on feasible W/S boundary (%.1f Pa). "
+                        "Proceeding with current W/S range %.1f..%.1f Pa.",
+                        dp.wing_loading_pa,
+                        ws_scan_min_pa,
+                        ws_scan_max_pa,
+                    )
+                break
+
+            old_min_pa = ws_scan_min_pa
+            old_max_pa = ws_scan_max_pa
+            old_span_pa = old_max_pa - old_min_pa
+            new_span_pa = old_span_pa * auto_widen_factor
+            ws_center_pa = 0.5 * (old_min_pa + old_max_pa)
+            ws_scan_min_pa = max(ws_step_pa, ws_center_pa - 0.5 * new_span_pa)
+            ws_scan_max_pa = ws_center_pa + 0.5 * new_span_pa
+            logger.info(
+                "Auto-widening W/S scan window for min_combined_pw: %.1f..%.1f -> %.1f..%.1f Pa "
+                "(factor %.3f, lower_hit=%s, upper_hit=%s, min_on_edge=%s).",
+                old_min_pa,
+                old_max_pa,
+                ws_scan_min_pa,
+                ws_scan_max_pa,
+                auto_widen_factor,
+                str(touches_lower),
+                str(touches_upper),
+                str(seed_on_boundary),
+            )
+            seed_expand_pass += 1
+
+        curve_minima = self._adr.curve_minima_kw_per_kg(
+            wingloading_pa=ws_grid,
+            curves=curves,
+            wsmax_cleanstall_pa=wsmax_cleanstall_pa,
         )
 
         cfg_used = self._apply_design_point_to_cfg(cfg, dp)
@@ -2885,22 +3006,50 @@ class CoupledConstraintSizingRunner:
                 wsmax_cleanstall_pa,
             )
 
+        for label, curve_key in (
+            ("combined", "combined"),
+            ("takeoff", str(cs.takeoff_constraint)),
+            ("climb", str(cs.climb_constraint)),
+            ("cruise", str(cs.cruise_constraint)),
+        ):
+            m = curve_minima.get(curve_key)
+            if m is None:
+                continue
+            logger.info(
+                "Curve minimum (%s/%s): W/S=%.1f Pa (%.2f kg/m^2), P/W=%.5f kW/kg",
+                label,
+                curve_key,
+                float(m["wing_loading_pa"]),
+                float(m["wing_loading_kg_per_m2"]),
+                float(m["p_w_kw_per_kg"]),
+            )
+
         design = HybridFuelCellAircraftDesign(cfg_used, out_dir=out_dir)
         phases, mass = design.run()
 
-        # Optional single-point dataframe
-        df = pd.DataFrame(
-            [
-                {
-                    "wing_loading_pa": dp.wing_loading_pa,
-                    "wing_loading_kg_per_m2": dp.wing_loading_kg_per_m2,
-                    "p_w_takeoff_kw_per_kg": dp.p_w_takeoff_kw_per_kg,
-                    "p_w_climb_kw_per_kg": dp.p_w_climb_kw_per_kg,
-                    "p_w_cruise_kw_per_kg": dp.p_w_cruise_kw_per_kg,
-                    "mtom_kg": mass.mtom_kg,
-                }
-            ]
-        )
+        row: Dict[str, object] = {
+            "wing_loading_pa": dp.wing_loading_pa,
+            "wing_loading_kg_per_m2": dp.wing_loading_kg_per_m2,
+            "p_w_takeoff_kw_per_kg": dp.p_w_takeoff_kw_per_kg,
+            "p_w_climb_kw_per_kg": dp.p_w_climb_kw_per_kg,
+            "p_w_cruise_kw_per_kg": dp.p_w_cruise_kw_per_kg,
+            "mtom_kg": mass.mtom_kg,
+        }
+        for label, curve_key in (
+            ("combined", "combined"),
+            ("takeoff", str(cs.takeoff_constraint)),
+            ("climb", str(cs.climb_constraint)),
+            ("cruise", str(cs.cruise_constraint)),
+        ):
+            m = curve_minima.get(curve_key)
+            if m is None:
+                continue
+            row[f"min_{label}_curve_key"] = curve_key
+            row[f"min_{label}_wing_loading_pa"] = float(m["wing_loading_pa"])
+            row[f"min_{label}_wing_loading_kg_per_m2"] = float(m["wing_loading_kg_per_m2"])
+            row[f"min_{label}_p_w_kw_per_kg"] = float(m["p_w_kw_per_kg"])
+
+        df = pd.DataFrame([row])
 
         if out_dir is not None and cfg.constraint_sizing.write_trade_csv:
             out_dir.mkdir(parents=True, exist_ok=True)
@@ -2988,6 +3137,27 @@ class CoupledConstraintSizingRunner:
             grid = np.append(grid, float(ws_center_pa))
             grid = np.clip(grid, float(ws_scan_min_pa), float(ws_scan_max_pa))
             return np.asarray(np.unique(np.round(grid, 9)), dtype=float)
+
+        def _center_out_order(
+            *,
+            idxs: np.ndarray,
+            ws_grid: np.ndarray,
+            ws_center_pa: Optional[float],
+            combined: np.ndarray,
+        ) -> np.ndarray:
+            """Prioritize candidates nearest to center; tie-break by lower combined P/W."""
+            idxs_arr = np.asarray(idxs, dtype=int)
+            if idxs_arr.size <= 1 or ws_center_pa is None or not math.isfinite(float(ws_center_pa)):
+                return idxs_arr
+            order = sorted(
+                idxs_arr.tolist(),
+                key=lambda i: (
+                    abs(float(ws_grid[int(i)]) - float(ws_center_pa)),
+                    float(combined[int(i)]),
+                    float(ws_grid[int(i)]),
+                ),
+            )
+            return np.asarray(order, dtype=int)
 
         # ADRpy pre-selection: identify feasible W/S region and center the MTOM search
         # around the point that minimises combined P/W.
@@ -3094,6 +3264,7 @@ class CoupledConstraintSizingRunner:
             ws_grid: np.ndarray,
             pass_id: int,
             stage: str,
+            ws_center_pa: Optional[float] = None,
         ) -> None:
             nonlocal best
             nonlocal mtom_seed
@@ -3125,6 +3296,12 @@ class CoupledConstraintSizingRunner:
             feasible_points += int(idxs.size)
 
             ws_feasible = np.asarray(ws_grid[idxs], dtype=float)
+            idxs_eval = _center_out_order(
+                idxs=idxs,
+                ws_grid=ws_grid,
+                ws_center_pa=ws_center_pa,
+                combined=combined,
+            )
             logger.info(
                 "ADRpy feasible W/S window (%s pass %d): %.1f .. %.1f Pa (%.2f .. %.2f kg/m^2), %d points",
                 stage,
@@ -3135,8 +3312,15 @@ class CoupledConstraintSizingRunner:
                 float(np.max(ws_feasible)) / _G0_MPS2,
                 int(ws_feasible.size),
             )
+            if ws_center_pa is not None and math.isfinite(float(ws_center_pa)):
+                logger.info(
+                    "Scanning order (%s pass %d): center-out around W/S=%.1f Pa",
+                    stage,
+                    pass_id,
+                    float(ws_center_pa),
+                )
 
-            for idx in idxs:
+            for idx in idxs_eval:
                 dp = self._adr._design_point_from_curves(wingloading_pa=ws_grid, curves=curves, idx=int(idx))
                 ws_key = round(float(dp.wing_loading_pa), 6)
                 if ws_key in seen_ws_keys:
@@ -3211,9 +3395,19 @@ class CoupledConstraintSizingRunner:
                 if best is None or mass_i.mtom_kg < best[0]:
                     best = (float(mass_i.mtom_kg), cfg_i, phases_i, mass_i, dp)
 
+            # Keep next pass warm-start near the current best, not the last edge candidate.
+            if best is not None:
+                mtom_seed = float(best[0])
+                p_seed = float(best[2]["climb"].p_total_w)
+
         try:
             # First pass over a focused W/S region around ADRpy min combined P/W.
-            _scan_ws_grid(ws_grid=ws_grid_focus, pass_id=0, stage="focus")
+            _scan_ws_grid(
+                ws_grid=ws_grid_focus,
+                pass_id=0,
+                stage="focus",
+                ws_center_pa=ws_seed_pa,
+            )
 
             # Local refinement passes around current best W/S.
             for p in range(refine_passes):
@@ -3236,7 +3430,12 @@ class CoupledConstraintSizingRunner:
                     float(ws_step_pa),
                     int(ws_grid_refine.size),
                 )
-                _scan_ws_grid(ws_grid=ws_grid_refine, pass_id=p + 1, stage="refine")
+                _scan_ws_grid(
+                    ws_grid=ws_grid_refine,
+                    pass_id=p + 1,
+                    stage="refine",
+                    ws_center_pa=float(best_dp.wing_loading_pa),
+                )
 
         finally:
             if cs.scan_quiet:
@@ -3556,6 +3755,9 @@ class OutputWriter:
         ws_min_pa = float(cs.ws_min_pa)
         ws_max_pa = float(cs.ws_max_pa)
         ws_step_pa = float(cs.ws_step_pa) if float(cs.ws_step_pa) > 0.0 else 25.0
+        takeoff_curve_key = str(cs.takeoff_constraint)
+        climb_curve_key = str(cs.climb_constraint)
+        cruise_curve_key = str(cs.cruise_constraint)
         ws_initial_pa = float(cfg_initial.wing.wing_loading_kg_per_m2) * _G0_MPS2
         if float(mass.wing_area_m2) > 0.0:
             ws_converged_pa = float(mass.mtom_kg / mass.wing_area_m2) * _G0_MPS2
@@ -3654,6 +3856,34 @@ class OutputWriter:
             "pw_comb_converged_kw_per_kg = float(np.interp(ws_converged_pa, wslist_pa, pwreq_quick_kw_per_kg))\n"
             "tw_comb_initial = float(np.interp(ws_initial_pa, wslist_pa, twreq_quick_combined))\n"
             "tw_comb_converged = float(np.interp(ws_converged_pa, wslist_pa, twreq_quick_combined))\n\n"
+            "try:\n"
+            "    wsmax_cleanstall_pa = float(concept.wsmaxcleanstall_pa())\n"
+            "except Exception:\n"
+            "    wsmax_cleanstall_pa = np.nan\n"
+            "valid_stall = np.isfinite(wslist_pa)\n"
+            "if np.isfinite(wsmax_cleanstall_pa):\n"
+            "    valid_stall &= wslist_pa <= wsmax_cleanstall_pa\n\n"
+            "def _curve_min(curve_key):\n"
+            "    if curve_key not in preq_quick:\n"
+            "        return np.nan, np.nan\n"
+            "    curve_kwkg = np.asarray(co.hp2kw(preq_quick[curve_key]), dtype=float) / float(TOW_kg)\n"
+            "    valid = np.isfinite(curve_kwkg) & valid_stall\n"
+            "    idxs = np.where(valid)[0]\n"
+            "    if idxs.size == 0:\n"
+            "        return np.nan, np.nan\n"
+            "    i_min = idxs[int(np.nanargmin(curve_kwkg[idxs]))]\n"
+            "    return float(wslist_pa[i_min]), float(curve_kwkg[i_min])\n\n"
+            f"curve_keys = {{'combined': 'combined', 'takeoff': {repr(takeoff_curve_key)}, 'climb': {repr(climb_curve_key)}, 'cruise': {repr(cruise_curve_key)}}}\n"
+            "print('--- Minimum ADRpy P/W points over scanned W/S ---')\n"
+            "for label, curve_key in curve_keys.items():\n"
+            "    ws_min_curve_pa, pw_min_curve_kwkg = _curve_min(curve_key)\n"
+            "    if np.isfinite(ws_min_curve_pa):\n"
+            "        print(\n"
+            "            f\"{label:>8}: curve='{curve_key}', W/S={ws_min_curve_pa:.1f} Pa \"\n"
+            "            f\"({ws_min_curve_pa / g0_mps2:.2f} kg/m^2), P/W={pw_min_curve_kwkg:.5f} kW/kg\"\n"
+            "        )\n"
+            "    else:\n"
+            "        print(f\"{label:>8}: curve='{curve_key}', no finite/stall-feasible points in scan window\")\n\n"
             "print('--- Marked design points (INI vs converged) ---')\n"
             "print(f\"INI input:      W/S={ws_initial_pa:.1f} Pa | P/W(climb,input)={p_w_initial_climb_kw_per_kg:.5f} kW/kg | \"\n"
             "      f\"P/W(combined@W/S)={pw_comb_initial_kw_per_kg:.5f} kW/kg | T/W(combined@W/S)={tw_comb_initial:.5f}\")\n"

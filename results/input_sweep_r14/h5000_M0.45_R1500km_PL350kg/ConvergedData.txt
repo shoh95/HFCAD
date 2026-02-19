@@ -1,0 +1,87 @@
+=============================================================
+========================= CONVERGED =========================
+=============================================================
+Constraint sizing: ENABLED (min_combined_pw)
+Input W/S: 239.63 kg/m^2 (2,350.0 Pa)
+Input P/W [kW/kg]: takeoff 0.11889, climb 0.13391, cruise 0.15852
+-------------------------------------------------------------
+
+Mission Time
+Climb time: 13.67 min (0.23 h)
+Cruise time: 151.72 min (2.53 h)
+Total flight time: 187.39 min (3.12 h)
+
+Phase Power Breakdown
+Phase      Time[min]     Total[kW]    FC Stack[kW]   Battery[kW]   Compressor[kW]   Cooling[kW]
+-----------------------------------------------------------------------------------------------
+ready           0.00          99.5            99.5           0.0              0.0           0.0
+taxi            5.00         198.9           198.9           0.0              0.0           0.0
+takeoff         1.00       1,765.3         1,315.3         438.4             11.5         488.5
+climb          13.67       1,989.2         1,481.5         493.8             13.9         679.4
+cruise        151.72       2,600.6         2,356.3           0.0            244.3       1,061.3
+loiter         15.00         260.1           235.6           0.0             24.4         106.1
+landing         1.00           0.0             0.0           0.0              0.0           0.0
+
+Pcomp_max (solved phases): 244.3 kW (cruise)
+Pnet (climb): 1,796 kW
+Pelectricnet (climb): 1,975 kW
+eta_pt: 0.9031
+
+Geometry
+S_wing: 45.10 m^2
+b_wing: 20.15 m
+Lfus: 22.12 m
+Ltank: 13.11 m
+S_HT: 5.00 m^2
+S_VT: 5.04 m^2
+b_HT: 4.74 m
+b_VT: 3.09 m
+X_HT_act: 20.02 m
+X_VT_act: 19.50 m
+
+One Nacelle (1/2)
+Stack(1/2): 767 kg, Compressor: 243 kg, Humidifier: 267 kg, HX: 571 kg
+W_FCS_single_nacelle (W_Stack+W_Compressor+W_Humidifier+W_Hx): 1,848 kg
+Representative FC phase: cruise
+Specific Power of Nacelle System: 0.704 kW/kg
+dim_hx: dX=1.689 m, dY=1.689 m, dZ=0.223 m
+dim_stack: dX=0.365 m, dY=0.484 m, dZ=0.484 m
+
+ALL Nacelles
+W_FCS_total: 3,696 kg
+W_PMAD: 173 kg
+W_Motors: 262 kg
+
+-----------------------
+W_Powertrain (W_FCS_total+W_PMAD+W_Motors): 4,131 kg
+-----------------------
+W_wing: 853 kg
+W_Htail: 49 kg
+W_Vtail: 83 kg
+W_fuselage: 859 kg
+W_lnd_gear_main: 243 kg
+W_lnd_gear_nose: 65 kg
+W_flight_control: 366 kg
+W_electric_system: 300 kg
+W_iae: 146 kg
+W_hydraulics: 130 kg
+W_fur: 607 kg
+-----------------------
+OEM: 3,700 kg
+-----------------------
+W_tank: 1,472 kg
+W_fuel: 654.1 kg
+W_batt: 499.2 kg
+-----------------------
+W_payload: 350 kg
+-----------------------
+MTOM_grouped (OEM+W_tank+W_fuel+W_batt+W_Powertrain+W_payload): 10,806 kg
+MTOM: 10,806 kg
+-----------------------
+
+Wing loading (MTOM/S_wing): 239.61 kg/m^2
+Power-to-weight (converged): 184.08 W/kg
+
+mdot_H2(cruise): 67.2 g/s
+Vtankex: 28.0 m^3
+========================== END ============================== | Execution time: 148.0 seconds
