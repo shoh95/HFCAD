@@ -44,6 +44,7 @@ _ureg = UnitRegistry()
 Q_ = _ureg.Quantity
 _G0 = Q_(9.80665, "meter / second ** 2")
 _G0_MPS2 = float(_G0.to("meter / second ** 2").magnitude)
+_LOITER_PW_RATIO_TO_CRUISE = 0.8
 
 # Ensure common aviation shorthand is available.
 # Pint usually includes 'knot' and 'nautical_mile', but some installations/older versions
@@ -2355,6 +2356,7 @@ class HybridFuelCellAircraftDesign:
             #     representative FC-system masses
             #   - takeoff+climb: battery sizing (when weights.battery_sizing_mode=TO_Climb_only)
             #   - takeoff: mission-timeline fuel accounting
+            loiter_p_w_kw_per_kg = _LOITER_PW_RATIO_TO_CRUISE * float(cfg.p_w.p_w_cruise_kw_per_kg)
 
             # Cruise (FC only -> psi = 0)
             phases["cruise"] = self._phase_solver.solve(
@@ -2369,13 +2371,13 @@ class HybridFuelCellAircraftDesign:
             )
             ptotal_guess["cruise"] = phases["cruise"].p_total_w
 
-            # Loiter (same solve logic as cruise, except lower speed)
+            # Loiter uses a fixed fraction of cruise P/W and lower speed.
             loiter_speed_ratio = _resolve_loiter_speed_ratio(cfg.flight.loiter_speed_ratio_to_cruise)
             loiter_mach = float(cfg.flight.mach_cr) * loiter_speed_ratio
             phases["loiter"] = self._phase_solver.solve(
                 name="loiter",
                 mtom_kg=mtom,
-                p_w_kw_per_kg=cfg.p_w.p_w_cruise_kw_per_kg,
+                p_w_kw_per_kg=loiter_p_w_kw_per_kg,
                 flight_point=FlightPoint(cfg.flight.h_cr_m, loiter_mach),
                 psi=0.0,
                 beta=self._beta_cruise,
@@ -4232,6 +4234,7 @@ def _converged_summary_text(
     execution_time_s: Optional[float] = None,
 ) -> str:
     """Converged summary used for console output and text export."""
+    loiter_p_w_kw_per_kg = _LOITER_PW_RATIO_TO_CRUISE * float(cfg.p_w.p_w_cruise_kw_per_kg)
 
     def _fmt_kw(value_kw: float, width: int = 14) -> str:
         if not math.isfinite(float(value_kw)):
@@ -4478,7 +4481,8 @@ def _converged_summary_text(
         hdr = [
             f"Constraint sizing: ENABLED ({cfg.constraint_sizing.selection})",
             f"Input W/S: {cfg.wing.wing_loading_kg_per_m2:,.2f} kg/m^2 ({cfg.wing.wing_loading_kg_per_m2*_G0_MPS2:,.1f} Pa)",
-            f"Input P/W [kW/kg]: takeoff {cfg.p_w.p_w_takeoff_kw_per_kg:.5f}, climb {cfg.p_w.p_w_climb_kw_per_kg:.5f}, cruise {cfg.p_w.p_w_cruise_kw_per_kg:.5f}",
+            f"Input P/W [kW/kg]: takeoff {cfg.p_w.p_w_takeoff_kw_per_kg:.5f}, climb {cfg.p_w.p_w_climb_kw_per_kg:.5f}, "
+            f"cruise {cfg.p_w.p_w_cruise_kw_per_kg:.5f}, loiter {loiter_p_w_kw_per_kg:.5f}",
             "-------------------------------------------------------------",
         ]
         lines = lines[:3] + hdr + lines[3:]
@@ -4495,6 +4499,7 @@ def _log_converged_state(
     cfg: DesignConfig,
 ) -> None:
     """Log a compact but actionable snapshot for a converged solution state."""
+    loiter_p_w_kw_per_kg = _LOITER_PW_RATIO_TO_CRUISE * float(cfg.p_w.p_w_cruise_kw_per_kg)
 
     climb = phases["climb"]
     cruise = phases["cruise"]
@@ -4555,8 +4560,8 @@ def _log_converged_state(
     )
     logger.info(
         f"  Config: wing loading input={cfg.wing.wing_loading_kg_per_m2:,.2f} kg/m^2 | "
-        f"P/W TO/Cl/Cr={cfg.p_w.p_w_takeoff_kw_per_kg:,.5f}/{cfg.p_w.p_w_climb_kw_per_kg:,.5f}/"
-        f"{cfg.p_w.p_w_cruise_kw_per_kg:,.5f} kW/kg",
+        f"P/W TO/Cl/Cr/Lo={cfg.p_w.p_w_takeoff_kw_per_kg:,.5f}/{cfg.p_w.p_w_climb_kw_per_kg:,.5f}/"
+        f"{cfg.p_w.p_w_cruise_kw_per_kg:,.5f}/{loiter_p_w_kw_per_kg:,.5f} kW/kg",
     )
 
 
