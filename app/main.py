@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import configparser
+import json
 import os
 import shutil
 import subprocess
@@ -21,6 +22,7 @@ import math
 import logging
 from dataclasses import dataclass, fields, replace
 from pathlib import Path
+from pprint import pformat
 from typing import Dict, Iterable, List, Optional, Tuple, get_args, get_origin
 
 import numpy as np
@@ -3523,6 +3525,432 @@ class OutputWriter:
         )
         summary_path.write_text(summary_text + "\n", encoding="utf-8")
 
+    @staticmethod
+    def _nb_source_lines(text: str) -> List[str]:
+        if not text.endswith("\n"):
+            text += "\n"
+        return text.splitlines(keepends=True)
+
+    def write_constraint_diagram_notebook(
+        self,
+        *,
+        phases: Dict[str, PhasePowerResult],
+        mass: MassBreakdown,
+        out_dir: Path,
+        input_path: Optional[Path] = None,
+        initial_cfg: Optional[DesignConfig] = None,
+    ) -> None:
+        """Write a per-case ADRpy constraint notebook when constraint sizing is enabled."""
+
+        cfg = self._cfg
+        if not cfg.constraint_sizing.enable:
+            return
+
+        b = cfg.constraint_brief
+        p = cfg.constraint_performance
+        g = cfg.constraint_geometry
+        cs = cfg.constraint_sizing
+
+        cfg_initial = initial_cfg or cfg
+        tow_kg = float(mass.mtom_kg) if float(mass.mtom_kg) > 0.0 else float(cfg.initial_mtom_kg)
+        ws_min_pa = float(cs.ws_min_pa)
+        ws_max_pa = float(cs.ws_max_pa)
+        ws_step_pa = float(cs.ws_step_pa) if float(cs.ws_step_pa) > 0.0 else 25.0
+        ws_initial_pa = float(cfg_initial.wing.wing_loading_kg_per_m2) * _G0_MPS2
+        if float(mass.wing_area_m2) > 0.0:
+            ws_converged_pa = float(mass.mtom_kg / mass.wing_area_m2) * _G0_MPS2
+        else:
+            ws_converged_pa = float(cfg.wing.wing_loading_kg_per_m2) * _G0_MPS2
+        p_w_initial_climb_kw_per_kg = float(cfg_initial.p_w.p_w_climb_kw_per_kg)
+        if "climb" in phases and float(mass.mtom_kg) > 0.0:
+            p_w_converged_climb_kw_per_kg = float(phases["climb"].p_total_w / mass.mtom_kg / 1000.0)
+        else:
+            p_w_converged_climb_kw_per_kg = float(cfg.p_w.p_w_climb_kw_per_kg)
+
+        designbrief = {
+            "rwyelevation_m": float(b.rwyelevation_m),
+            "groundrun_m": float(b.groundrun_m),
+            "stloadfactor": float(b.stloadfactor),
+            "turnalt_m": float(b.turnalt_m),
+            "turnspeed_ktas": float(b.turnspeed_ktas),
+            "climbalt_m": float(b.climbalt_m),
+            "climbspeed_kias": float(b.climbspeed_kias),
+            "climbrate_fpm": float(b.climbrate_fpm),
+            "cruisealt_m": float(b.cruisealt_m),
+            "cruisespeed_ktas": float(b.cruisespeed_ktas),
+            "cruisethrustfact": float(b.cruisethrustfact),
+            "servceil_m": float(b.servceil_m),
+            "secclimbspd_kias": float(b.secclimbspd_kias),
+            "vstallclean_kcas": float(b.vstallclean_kcas),
+        }
+        designdefinition = {
+            "aspectratio": float(cfg.wing.aspect_ratio),
+            "sweep_le_deg": float(g.sweep_le_deg),
+            "sweep_mt_deg": float(g.sweep_mt_deg),
+            "weightfractions": {"turn": 1.0, "climb": 1.0, "cruise": 1.0, "servceil": 1.0},
+            "weight_n": "co.kg2n(TOW_kg)",
+        }
+        designperformance = {
+            "CDTO": float(p.cdto),
+            "CLTO": float(p.clto),
+            "CLmaxTO": float(p.clmax_to),
+            "CLmaxclean": float(p.clmax_clean),
+            "mu_R": float(p.mu_r),
+            "CDminclean": float(p.cdmin_clean),
+            "etaprop": {
+                "take-off": float(p.etaprop_takeoff),
+                "climb": float(p.etaprop_climb),
+                "cruise": float(p.etaprop_cruise),
+                "turn": float(p.etaprop_turn),
+                "servceil": float(p.etaprop_servceil),
+            },
+        }
+
+        if input_path is not None:
+            case_name = input_path.name
+        else:
+            case_name = "input file"
+
+        dsdef_text = pformat(designdefinition, sort_dicts=False).replace("'co.kg2n(TOW_kg)'", "co.kg2n(TOW_kg)")
+        code_setup = (
+            "import numpy as np\n"
+            "import matplotlib.pyplot as plt\n"
+            "from ADRpy import unitconversions as co\n"
+            "from ADRpy import constraintanalysis as ca\n"
+            "from ADRpy import atmospheres as at\n\n"
+            f"designbrief = {pformat(designbrief, sort_dicts=False)}\n"
+            "designatm = at.Atmosphere()\n"
+            f"TOW_kg = {tow_kg:.3f}\n\n"
+            f"designdefinition = {dsdef_text}\n\n"
+            f"designperformance = {pformat(designperformance, sort_dicts=False)}\n\n"
+            f"designpropulsion = {repr(str(cs.propulsion_type))}\n\n"
+            "concept = ca.AircraftConcept(designbrief, designdefinition, designperformance, designatm, designpropulsion)\n"
+        )
+        code_ws_grid = (
+            f"ws_min_pa = {ws_min_pa:.3f}\n"
+            f"ws_max_pa = {ws_max_pa:.3f}\n"
+            f"ws_step_pa = {ws_step_pa:.3f}\n\n"
+            "ws_step_plot_pa = max(ws_step_pa / 10.0, 1.0)\n"
+            "wslist_pa = np.arange(ws_min_pa, ws_max_pa + 0.5 * ws_step_plot_pa, ws_step_plot_pa)\n"
+            "if wslist_pa.size < 2:\n"
+            "    wslist_pa = np.array([ws_min_pa, ws_max_pa], dtype=float)\n\n"
+            "preq_quick = concept.powerrequired(wslist_pa, tow_kg=TOW_kg, feasibleonly=False, map2sl=True)\n"
+            "twreq_quick = concept.twrequired(wslist_pa, feasibleonly=False, map2sl=True)\n"
+            "preq_quick_kw_combined = np.asarray(co.hp2kw(preq_quick['combined']), dtype=float)\n"
+            "y_lim_power_kw = float(np.nanmax(preq_quick_kw_combined) * 2.0)\n"
+            "y_lim_tw = float(np.nanmax(twreq_quick['combined']) * 2.0)\n\n"
+            f"ws_initial_pa = {ws_initial_pa:.6f}\n"
+            f"ws_converged_pa = {ws_converged_pa:.6f}\n"
+            f"p_w_initial_climb_kw_per_kg = {p_w_initial_climb_kw_per_kg:.8f}\n"
+            f"p_w_converged_climb_kw_per_kg = {p_w_converged_climb_kw_per_kg:.8f}\n\n"
+            "g0_mps2 = 9.80665\n"
+            "wslist_kg_per_m2 = wslist_pa / g0_mps2\n"
+            "ws_initial_kg_per_m2 = ws_initial_pa / g0_mps2\n"
+            "ws_converged_kg_per_m2 = ws_converged_pa / g0_mps2\n\n"
+            "pwreq_quick_kw_per_kg = preq_quick_kw_combined / float(TOW_kg)\n"
+            "y_lim_pw_kw_per_kg = float(np.nanmax(pwreq_quick_kw_per_kg) * 2.0)\n"
+            "twreq_quick_combined = np.asarray(twreq_quick['combined'], dtype=float)\n\n"
+            "pw_comb_initial_kw_per_kg = float(np.interp(ws_initial_pa, wslist_pa, pwreq_quick_kw_per_kg))\n"
+            "pw_comb_converged_kw_per_kg = float(np.interp(ws_converged_pa, wslist_pa, pwreq_quick_kw_per_kg))\n"
+            "tw_comb_initial = float(np.interp(ws_initial_pa, wslist_pa, twreq_quick_combined))\n"
+            "tw_comb_converged = float(np.interp(ws_converged_pa, wslist_pa, twreq_quick_combined))\n\n"
+            "print('--- Marked design points (INI vs converged) ---')\n"
+            "print(f\"INI input:      W/S={ws_initial_pa:.1f} Pa | P/W(climb,input)={p_w_initial_climb_kw_per_kg:.5f} kW/kg | \"\n"
+            "      f\"P/W(combined@W/S)={pw_comb_initial_kw_per_kg:.5f} kW/kg | T/W(combined@W/S)={tw_comb_initial:.5f}\")\n"
+            "print(f\"Converged run:  W/S={ws_converged_pa:.1f} Pa | P/W(climb,conv)={p_w_converged_climb_kw_per_kg:.5f} kW/kg | \"\n"
+            "      f\"P/W(combined@W/S)={pw_comb_converged_kw_per_kg:.5f} kW/kg | T/W(combined@W/S)={tw_comb_converged:.5f}\")\n\n"
+        )
+        code_quick_power = (
+            "from matplotlib.ticker import FuncFormatter\n\n"
+            "y_lim_p_hp = float(co.kw2hp(y_lim_pw_kw_per_kg * TOW_kg))\n"
+            "_show_orig = plt.show\n"
+            "_close_orig = plt.close\n"
+            "try:\n"
+            "    # Keep ADRpy's original combined-plot styling figure alive for post-formatting.\n"
+            "    plt.show = lambda *args, **kwargs: None\n"
+            "    plt.close = lambda *args, **kwargs: None\n"
+            "    _ = concept.propulsionsensitivity_monothetic(\n"
+            "        wingloading_pa=wslist_pa,\n"
+            "        show='combined',\n"
+            "        y_var='p_hp',\n"
+            "        x_var='ws_pa',\n"
+            "        y_lim=y_lim_p_hp,\n"
+            "    )\n"
+            "finally:\n"
+            "    plt.show = _show_orig\n"
+            "    plt.close = _close_orig\n"
+            "ax = plt.gca()\n"
+            "p_hp_initial_marker = float(co.kw2hp(pw_comb_initial_kw_per_kg * TOW_kg))\n"
+            "p_hp_converged_marker = float(co.kw2hp(pw_comb_converged_kw_per_kg * TOW_kg))\n"
+            "ax.scatter([ws_initial_pa], [p_hp_initial_marker], color='tab:orange', marker='o', s=40, label='INI point')\n"
+            "ax.scatter([ws_converged_pa], [p_hp_converged_marker], color='tab:red', marker='X', s=65, label='Converged point')\n"
+            "ax.annotate('INI', (ws_initial_pa, p_hp_initial_marker), textcoords='offset points', xytext=(6, 8), fontsize=9)\n"
+            "ax.annotate('Converged', (ws_converged_pa, p_hp_converged_marker), textcoords='offset points', xytext=(6, -12), fontsize=9)\n"
+            "ax.xaxis.set_major_formatter(FuncFormatter(lambda x, _: f\"{x / g0_mps2:.0f}\"))\n"
+            "ax.yaxis.set_major_formatter(FuncFormatter(lambda y, _: f\"{co.hp2kw(y) / TOW_kg:.3f}\"))\n"
+            "ax.set_xlabel('Wing loading [kg/m$^2$]')\n"
+            "ax.set_ylabel('Power-to-weight [kW/kg]')\n"
+            "ax.set_title('P/W vs W/S')\n"
+            "ax.legend(loc='center left', bbox_to_anchor=(1, 0.5), fontsize=8)\n"
+            "plt.tight_layout()\n"
+            "plt.show()\n"
+        )
+        code_quick_tw = (
+            "_ = concept.propulsionsensitivity_monothetic(\n"
+            "    wingloading_pa=wslist_pa,\n"
+            "    show='combined',\n"
+            "    y_var='tw',\n"
+            "    x_var='ws_pa',\n"
+            "    y_lim=y_lim_tw,\n"
+            ")\n"
+        )
+        code_flexible = (
+            "preq = concept.powerrequired(wslist_pa, tow_kg=TOW_kg, feasibleonly=False, map2sl=True)\n"
+            "preq_kw = {k: np.asarray(co.hp2kw(v), dtype=float) for k, v in preq.items()}\n"
+            "Smin_m2 = concept.smincleanstall_m2(TOW_kg)\n"
+            "wingarea_m2 = co.kg2n(TOW_kg) / wslist_pa\n\n"
+            "s_initial_m2 = float(co.kg2n(TOW_kg) / ws_initial_pa)\n"
+            "s_converged_m2 = float(co.kg2n(TOW_kg) / ws_converged_pa)\n"
+            "p_kw_initial = float(np.interp(ws_initial_pa, wslist_pa, preq_kw['combined']))\n"
+            "p_kw_converged = float(np.interp(ws_converged_pa, wslist_pa, preq_kw['combined']))\n\n"
+            "plt.rcParams['figure.figsize'] = [8, 6]\n"
+            "plt.rcParams['figure.dpi'] = 160\n"
+            "plt.plot(wingarea_m2, preq_kw['take-off'], label='Take-off')\n"
+            "plt.plot(wingarea_m2, preq_kw['turn'], label='Turn')\n"
+            "plt.plot(wingarea_m2, preq_kw['climb'], label='Climb')\n"
+            "plt.plot(wingarea_m2, preq_kw['cruise'], label='Cruise')\n"
+            "plt.plot(wingarea_m2, preq_kw['servceil'], label='Service ceiling')\n"
+            "combplot = plt.plot(wingarea_m2, preq_kw['combined'], label='Combined')\n"
+            "plt.setp(combplot, linewidth=4)\n"
+            "y_max = float(np.nanmax(preq_kw['combined']) * 2.2)\n"
+            "stall_label = f\"Clean stall at {designbrief['vstallclean_kcas']} KCAS\"\n"
+            "plt.plot([Smin_m2, Smin_m2], [0, y_max], label=stall_label)\n"
+            "plt.scatter([s_initial_m2], [p_kw_initial], color='tab:orange', marker='o', s=40, label='INI point')\n"
+            "plt.scatter([s_converged_m2], [p_kw_converged], color='tab:red', marker='X', s=65, label='Converged point')\n"
+            "plt.annotate('INI', (s_initial_m2, p_kw_initial), textcoords='offset points', xytext=(6, 8), fontsize=9)\n"
+            "plt.annotate('Converged', (s_converged_m2, p_kw_converged), textcoords='offset points', xytext=(6, -12), fontsize=9)\n"
+            "plt.legend(loc='upper left')\n"
+            "plt.ylabel('Power required (kW)')\n"
+            "plt.xlabel('S (m$^2$)')\n"
+            "plt.title(f\"Minimum SL power required (MTOW = {round(TOW_kg)} kg)\")\n"
+            "plt.xlim(min(wingarea_m2), max(wingarea_m2))\n"
+            "plt.ylim(0, y_max)\n"
+            "plt.grid(True)\n"
+            "plt.tight_layout()\n"
+            "plt.savefig('Constraint_Diagram.png', dpi=200)\n"
+            "plt.show()\n"
+        )
+        code_marked_pw_tw = (
+            "fig, ax = plt.subplots(1, 2, figsize=(12, 4.5), dpi=160)\n\n"
+            "ax[0].plot(wslist_kg_per_m2, pwreq_quick_kw_per_kg, color='black', linewidth=2.0, label='Combined P/W')\n"
+            "ax[0].scatter([ws_initial_kg_per_m2], [pw_comb_initial_kw_per_kg], color='tab:orange', marker='o', s=40, label='INI point')\n"
+            "ax[0].scatter([ws_converged_kg_per_m2], [pw_comb_converged_kw_per_kg], color='tab:red', marker='X', s=65, label='Converged point')\n"
+            "ax[0].annotate(f\"INI: {pw_comb_initial_kw_per_kg:.4f}\", (ws_initial_kg_per_m2, pw_comb_initial_kw_per_kg),\n"
+            "               textcoords='offset points', xytext=(8, 8), fontsize=8)\n"
+            "ax[0].annotate(f\"Conv: {pw_comb_converged_kw_per_kg:.4f}\", (ws_converged_kg_per_m2, pw_comb_converged_kw_per_kg),\n"
+            "               textcoords='offset points', xytext=(8, -12), fontsize=8)\n"
+            "ax[0].set_xlim(float(np.min(wslist_kg_per_m2)), float(np.max(wslist_kg_per_m2)))\n"
+            "ax[0].set_ylim(0.0, float(np.nanmax(pwreq_quick_kw_per_kg) * 2.0))\n"
+            "ax[0].set_xlabel('Wing loading [kg/m$^2$]')\n"
+            "ax[0].set_ylabel('Power-to-weight [kW/kg]')\n"
+            "ax[0].set_title('P/W vs W/S with INI and Converged points')\n"
+            "ax[0].grid(True)\n"
+            "ax[0].legend(loc='upper left', fontsize=8)\n\n"
+            "ax[1].plot(wslist_kg_per_m2, twreq_quick_combined, color='black', linewidth=2.0, label='Combined T/W')\n"
+            "ax[1].scatter([ws_initial_kg_per_m2], [tw_comb_initial], color='tab:orange', marker='o', s=40, label='INI point')\n"
+            "ax[1].scatter([ws_converged_kg_per_m2], [tw_comb_converged], color='tab:red', marker='X', s=65, label='Converged point')\n"
+            "ax[1].annotate(f\"INI: {tw_comb_initial:.4f}\", (ws_initial_kg_per_m2, tw_comb_initial),\n"
+            "               textcoords='offset points', xytext=(8, 8), fontsize=8)\n"
+            "ax[1].annotate(f\"Conv: {tw_comb_converged:.4f}\", (ws_converged_kg_per_m2, tw_comb_converged),\n"
+            "               textcoords='offset points', xytext=(8, -12), fontsize=8)\n"
+            "ax[1].set_xlim(float(np.min(wslist_kg_per_m2)), float(np.max(wslist_kg_per_m2)))\n"
+            "ax[1].set_ylim(0.0, float(np.nanmax(twreq_quick_combined) * 2.0))\n"
+            "ax[1].set_xlabel('Wing loading [kg/m$^2$]')\n"
+            "ax[1].set_ylabel('Thrust-to-weight ratio [-]')\n"
+            "ax[1].set_title('Combined T/W with INI and Converged points')\n"
+            "ax[1].grid(True)\n"
+            "ax[1].legend(loc='upper left', fontsize=8)\n\n"
+            "plt.tight_layout()\n"
+            "plt.show()\n"
+        )
+        code_sensitivity = (
+            "def _span(v, frac=0.05):\n"
+            "    v = float(v)\n"
+            "    if v <= 0.0:\n"
+            "        return v\n"
+            "    return [v * (1.0 - frac), v * (1.0 + frac)]\n\n"
+            "designbrief_sens = {\n"
+            "    'rwyelevation_m': float(designbrief['rwyelevation_m']),\n"
+            "    'groundrun_m': _span(designbrief['groundrun_m']),\n"
+            "    'stloadfactor': _span(designbrief['stloadfactor']),\n"
+            "    'turnalt_m': _span(designbrief['turnalt_m']),\n"
+            "    'turnspeed_ktas': _span(designbrief['turnspeed_ktas']),\n"
+            "    'climbalt_m': float(designbrief['climbalt_m']),\n"
+            "    'climbspeed_kias': _span(designbrief['climbspeed_kias']),\n"
+            "    'climbrate_fpm': _span(designbrief['climbrate_fpm']),\n"
+            "    'cruisealt_m': _span(designbrief['cruisealt_m']),\n"
+            "    'cruisespeed_ktas': _span(designbrief['cruisespeed_ktas']),\n"
+            "    'cruisethrustfact': _span(designbrief['cruisethrustfact']),\n"
+            "    'servceil_m': _span(designbrief['servceil_m']),\n"
+            "    'secclimbspd_kias': _span(designbrief['secclimbspd_kias']),\n"
+            "    'vstallclean_kcas': _span(designbrief['vstallclean_kcas']),\n"
+            "}\n\n"
+            "designdefinition_sens = {\n"
+            "    'aspectratio': _span(designdefinition['aspectratio']),\n"
+            "    'sweep_le_deg': designdefinition['sweep_le_deg'],\n"
+            "    'sweep_mt_deg': designdefinition['sweep_mt_deg'],\n"
+            "    'weightfractions': designdefinition['weightfractions'],\n"
+            "    'weight_n': co.kg2n(TOW_kg),\n"
+            "}\n\n"
+            "designperformance_sens = {\n"
+            "    'CDTO': _span(designperformance['CDTO']),\n"
+            "    'CLTO': _span(designperformance['CLTO']),\n"
+            "    'CLmaxTO': _span(designperformance['CLmaxTO']),\n"
+            "    'CLmaxclean': _span(designperformance['CLmaxclean']),\n"
+            "    'mu_R': designperformance['mu_R'],\n"
+            "    'CDminclean': _span(designperformance['CDminclean']),\n"
+            "    'etaprop': {\n"
+            "        # Keep etaprop scalar for ADRpy compatibility in electric cases.\n"
+            "        'take-off': designperformance['etaprop']['take-off'],\n"
+            "        'climb': designperformance['etaprop']['climb'],\n"
+            "        'cruise': designperformance['etaprop']['cruise'],\n"
+            "        'turn': designperformance['etaprop']['turn'],\n"
+            "        'servceil': designperformance['etaprop']['servceil'],\n"
+            "    },\n"
+            "}\n\n"
+            "concept_sens = ca.AircraftConcept(\n"
+            "    designbrief_sens,\n"
+            "    designdefinition_sens,\n"
+            "    designperformance_sens,\n"
+            "    designatm,\n"
+            "    designpropulsion,\n"
+            ")\n\n"
+            "from matplotlib.ticker import FuncFormatter\n\n"
+            "y_lim_sens_p_hp = float(co.kw2hp(y_lim_power_kw))\n\n"
+            "def _run_sensitivity_plot_with_kw_labels(show_arg, **kwargs):\n"
+            "    _show_orig = plt.show\n"
+            "    _close_orig = plt.close\n"
+            "    try:\n"
+            "        # Preserve ADRpy styling while allowing post-format axis relabeling.\n"
+            "        plt.show = lambda *args, **kw: None\n"
+            "        plt.close = lambda *args, **kw: None\n"
+            "        concept_sens.propulsionsensitivity_monothetic(\n"
+            "            wingloading_pa=wslist_pa,\n"
+            "            show=show_arg,\n"
+            "            y_var='p_hp',\n"
+            "            x_var='s_m2',\n"
+            "            y_lim=y_lim_sens_p_hp,\n"
+            "            **kwargs,\n"
+            "        )\n"
+            "    finally:\n"
+            "        plt.show = _show_orig\n"
+            "        plt.close = _close_orig\n"
+            "    fig = plt.gcf()\n"
+            "    for ax in fig.axes:\n"
+            "        if ax.get_ylabel().strip() == 'Power required [hp]':\n"
+            "            ax.yaxis.set_major_formatter(FuncFormatter(lambda y, _: f\"{co.hp2kw(y):.0f}\"))\n"
+            "            ax.set_ylabel('Power required [kW]')\n"
+            "    plt.show()\n\n"
+            "_run_sensitivity_plot_with_kw_labels(True)\n\n"
+            "_run_sensitivity_plot_with_kw_labels('cruise', maskbool=False)\n"
+        )
+
+        nb = {
+            "cells": [
+                {
+                    "cell_type": "markdown",
+                    "metadata": {},
+                    "source": self._nb_source_lines(
+                        f"# Constraint Diagram\n\n"
+                        f"Auto-generated from `{case_name}` by `app/main.py`."
+                    ),
+                },
+                {
+                    "cell_type": "code",
+                    "execution_count": None,
+                    "metadata": {},
+                    "outputs": [],
+                    "source": self._nb_source_lines(code_setup),
+                },
+                {
+                    "cell_type": "markdown",
+                    "metadata": {},
+                    "source": self._nb_source_lines("## Quick Constraint Diagram Plots"),
+                },
+                {
+                    "cell_type": "code",
+                    "execution_count": None,
+                    "metadata": {},
+                    "outputs": [],
+                    "source": self._nb_source_lines(code_ws_grid),
+                },
+                {
+                    "cell_type": "code",
+                    "execution_count": None,
+                    "metadata": {},
+                    "outputs": [],
+                    "source": self._nb_source_lines(code_quick_power),
+                },
+                {
+                    "cell_type": "code",
+                    "execution_count": None,
+                    "metadata": {},
+                    "outputs": [],
+                    "source": self._nb_source_lines(code_quick_tw),
+                },
+                {
+                    "cell_type": "markdown",
+                    "metadata": {},
+                    "source": self._nb_source_lines("## Flexible Constraint Plot"),
+                },
+                {
+                    "cell_type": "code",
+                    "execution_count": None,
+                    "metadata": {},
+                    "outputs": [],
+                    "source": self._nb_source_lines(code_flexible),
+                },
+                {
+                    "cell_type": "markdown",
+                    "metadata": {},
+                    "source": self._nb_source_lines("## INI vs Converged Markers (P/W and T/W)"),
+                },
+                {
+                    "cell_type": "code",
+                    "execution_count": None,
+                    "metadata": {},
+                    "outputs": [],
+                    "source": self._nb_source_lines(code_marked_pw_tw),
+                },
+                {
+                    "cell_type": "markdown",
+                    "metadata": {},
+                    "source": self._nb_source_lines(
+                        "## Sensitivity Plots\n\n"
+                        "This section mirrors the sensitivity plotting workflow from `constraint_example.ipynb` "
+                        "using +/-5% ranges around this INI case values."
+                    ),
+                },
+                {
+                    "cell_type": "code",
+                    "execution_count": None,
+                    "metadata": {},
+                    "outputs": [],
+                    "source": self._nb_source_lines(code_sensitivity),
+                },
+            ],
+            "metadata": {
+                "kernelspec": {"display_name": "Python 3", "language": "python", "name": "python3"},
+                "language_info": {"name": "python"},
+            },
+            "nbformat": 4,
+            "nbformat_minor": 5,
+        }
+
+        out_dir.mkdir(parents=True, exist_ok=True)
+        notebook_path = out_dir / "Constraint_Diagram.ipynb"
+        notebook_path.write_text(json.dumps(nb, indent=2), encoding="utf-8")
+
 
 # ============================
 # Entry point
@@ -3979,6 +4407,13 @@ def main(argv: Optional[List[str]] = None) -> Optional[float]:
         mass=mass,
         out_dir=out_dir,
         execution_time_s=elapsed_time,
+    )
+    writer.write_constraint_diagram_notebook(
+        phases=phases,
+        mass=mass,
+        out_dir=out_dir,
+        input_path=input_path,
+        initial_cfg=cfg,
     )
     return elapsed_time
 
