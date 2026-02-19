@@ -415,6 +415,7 @@ class FlightConfig:
 
     h_cr_m: float = 3000.0
     mach_cr: float = 0.35
+    loiter_speed_ratio_to_cruise: float = 0.83
 
     # Takeoff modelling point (legacy)
     h_takeoff_m: float = 0.0
@@ -694,6 +695,17 @@ def _resolve_cruise_betas(
 
     # Numeric beta is applied only to cruise; cruise_charger remains fixed at default.
     return beta_num, beta_default
+
+
+def _resolve_loiter_speed_ratio(loiter_speed_ratio_to_cruise: float) -> float:
+    """Validate and return loiter speed ratio relative to cruise speed."""
+
+    ratio = float(loiter_speed_ratio_to_cruise)
+    if ratio <= 0.0:
+        raise ValueError(
+            f"flight.loiter_speed_ratio_to_cruise must be > 0, got {loiter_speed_ratio_to_cruise}."
+        )
+    return ratio
 
 
 def _split_list(value: str) -> List[str]:
@@ -1784,6 +1796,7 @@ class MassEstimator:
         mtom_guess_kg: float,
         climb: PhasePowerResult,
         cruise: PhasePowerResult,
+        loiter: PhasePowerResult,
         takeoff: PhasePowerResult,
         cruise_charger: Optional[PhasePowerResult] = None,
     ) -> MassBreakdown:
@@ -1797,6 +1810,7 @@ class MassEstimator:
             "takeoff": takeoff,
             "climb": climb,
             "cruise": cruise,
+            "loiter": loiter,
         }
         if cruise_charger is not None:
             sizing_phases["cruise_charger"] = cruise_charger
@@ -1831,6 +1845,8 @@ class MassEstimator:
 
         v_climb = Q_(float(brief.climbspeed_kias), "knot").to("meter / second")
         v_cruise = Q_(float(brief.cruisespeed_ktas), "knot").to("meter / second")
+        loiter_speed_ratio = _resolve_loiter_speed_ratio(cfg.flight.loiter_speed_ratio_to_cruise)
+        v_loiter = loiter_speed_ratio * v_cruise
         if float(v_climb.to("meter / second").magnitude) <= 0.0:
             raise ValueError(f"constraint_brief.climbspeed_kias must be > 0, got {brief.climbspeed_kias}.")
         if float(v_cruise.to("meter / second").magnitude) <= 0.0:
@@ -1913,7 +1929,7 @@ class MassEstimator:
         # Fuel mass and tank sizing
         # -----------------
         # Mission timeline for fuel: ready(0), taxi(5 min), takeoff(1 min), climb(variable),
-        # cruise(variable), loiter(15 min, mdot=0.1*cruise mdot), landing(1 min, no fuel).
+        # cruise(variable), loiter(15 min at loiter speed), landing(1 min, no fuel).
         # This intentionally does not use cfg.mission.times_min.
         t_ready = Q_(0.0, "minute").to("second")
         t_taxi = Q_(5.0, "minute").to("second")
@@ -1923,12 +1939,12 @@ class MassEstimator:
 
         mdot_climb = Q_(float(climb.mdot_h2_kgps), "kilogram / second")
         mdot_cruise = Q_(float(cruise.mdot_h2_kgps), "kilogram / second")
+        mdot_loiter = Q_(float(loiter.mdot_h2_kgps), "kilogram / second")
         mdot_takeoff = Q_(float(takeoff.mdot_h2_kgps), "kilogram / second")
         mdot_taxi = 0.10 * mdot_climb
-        mdot_loiter = 0.10 * mdot_cruise
         mdot_landing = Q_(0.0, "kilogram / second")
 
-        r_loiter = (v_cruise * t_loiter).to("meter")
+        r_loiter = (v_loiter * t_loiter).to("meter")
         range_total = Q_(float(cfg.hydrogen.range_total_m), "meter")
         r_cruise = (range_total - r_climb - r_loiter).to("meter")
         if float(r_cruise.to("meter").magnitude) < 0.0:
@@ -2267,6 +2283,7 @@ class HybridFuelCellAircraftDesign:
 
         ptotal_guess = {
             "cruise": p0,
+            "loiter": p0,
             "cruise_charger": p0,
             "takeoff": p0,
             "climb": p0,
@@ -2332,8 +2349,8 @@ class HybridFuelCellAircraftDesign:
             logger.info("======================================================")
             logger.info(f"======================= ITER {outer_iter} =======================")
 
-            # NOTE: MTOM closure uses cruise/climb/takeoff/cruise_charger:
-            #   - max FC-power phase among takeoff/climb/cruise/cruise_charger:
+            # NOTE: MTOM closure uses cruise/loiter/climb/takeoff/cruise_charger:
+            #   - max FC-power phase among takeoff/climb/cruise/loiter/cruise_charger:
             #     representative FC-system masses
             #   - takeoff+climb: battery sizing (when weights.battery_sizing_mode=TO_Climb_only)
             #   - takeoff: mission-timeline fuel accounting
@@ -2350,6 +2367,21 @@ class HybridFuelCellAircraftDesign:
                 oversizing=cfg.fuel_cell_op.oversizing,
             )
             ptotal_guess["cruise"] = phases["cruise"].p_total_w
+
+            # Loiter (same solve logic as cruise, except lower speed)
+            loiter_speed_ratio = _resolve_loiter_speed_ratio(cfg.flight.loiter_speed_ratio_to_cruise)
+            loiter_mach = float(cfg.flight.mach_cr) * loiter_speed_ratio
+            phases["loiter"] = self._phase_solver.solve(
+                name="loiter",
+                mtom_kg=mtom,
+                p_w_kw_per_kg=cfg.p_w.p_w_cruise_kw_per_kg,
+                flight_point=FlightPoint(cfg.flight.h_cr_m, loiter_mach),
+                psi=0.0,
+                beta=self._beta_cruise,
+                initial_total_power_w=ptotal_guess["loiter"],
+                oversizing=cfg.fuel_cell_op.oversizing,
+            )
+            ptotal_guess["loiter"] = phases["loiter"].p_total_w
 
             # Climb
             phases["climb"] = self._phase_solver.solve(
@@ -2394,6 +2426,7 @@ class HybridFuelCellAircraftDesign:
                 mtom_guess_kg=mtom,
                 climb=phases["climb"],
                 cruise=phases["cruise"],
+                loiter=phases["loiter"],
                 takeoff=phases["takeoff"],
                 cruise_charger=phases["cruise_charger"],
             )
@@ -3589,6 +3622,8 @@ class OutputWriter:
 
         v_climb = Q_(float(brief.climbspeed_kias), "knot").to("meter / second")
         v_cruise = Q_(float(brief.cruisespeed_ktas), "knot").to("meter / second")
+        loiter_speed_ratio = _resolve_loiter_speed_ratio(cfg.flight.loiter_speed_ratio_to_cruise)
+        v_loiter = loiter_speed_ratio * v_cruise
         if float(v_climb.to("meter / second").magnitude) <= 0.0:
             raise ValueError(f"constraint_brief.climbspeed_kias must be > 0, got {brief.climbspeed_kias}.")
         if float(v_cruise.to("meter / second").magnitude) <= 0.0:
@@ -3604,7 +3639,7 @@ class OutputWriter:
         t_loiter = Q_(15.0, "minute").to("second")
         t_landing = Q_(1.0, "minute").to("second")
 
-        r_loiter = (v_cruise * t_loiter).to("meter")
+        r_loiter = (v_loiter * t_loiter).to("meter")
         range_total = Q_(float(cfg.hydrogen.range_total_m), "meter")
         r_cruise = (range_total - r_climb - r_loiter).to("meter")
         if float(r_cruise.to("meter").magnitude) < 0.0:
@@ -3625,7 +3660,8 @@ class OutputWriter:
         pbat_climb = float(phases["climb"].p_battery_w)
         pfc_cruise = float(phases["cruise"].p_total_w - phases["cruise"].p_battery_w)
         pbat_cruise = float(phases["cruise"].p_battery_w)
-        pfc_loiter = 0.10 * max(pfc_cruise, 0.0)
+        pfc_loiter = float(phases["loiter"].p_total_w - phases["loiter"].p_battery_w)
+        pbat_loiter = float(phases["loiter"].p_battery_w)
         pfc_landing = 0.0
 
         phase_names = ["ready", "taxi", "takeoff", "climb", "cruise", "loiter", "landing"]
@@ -3642,7 +3678,7 @@ class OutputWriter:
             dtype=float,
         )
         power_fc_w = np.array([pfc_ready, pfc_taxi, pfc_takeoff, pfc_climb, pfc_cruise, pfc_loiter, pfc_landing], dtype=float)
-        power_bat_w = np.array([0.0, 0.0, pbat_takeoff, pbat_climb, pbat_cruise, 0.0, 0.0], dtype=float)
+        power_bat_w = np.array([0.0, 0.0, pbat_takeoff, pbat_climb, pbat_cruise, pbat_loiter, 0.0], dtype=float)
 
         t_edges_min = np.concatenate(([0.0], np.cumsum(phase_durations_min)))
         y_fc_kw = power_fc_w / 1000.0
@@ -4200,11 +4236,18 @@ def _converged_summary_text(
             return f"{'n/a':>{width}}"
         return f"{float(value_kw):>{width},.1f}"
 
+    def _fmt_gps(value_gps: float, width: int = 12) -> str:
+        if not math.isfinite(float(value_gps)):
+            return f"{'n/a':>{width}}"
+        return f"{float(value_gps):>{width},.1f}"
+
     # Mission timing summary.
     brief = cfg.constraint_brief
     climb_rate = Q_(float(brief.climbrate_fpm), "foot / minute").to("meter / second")
     v_climb = Q_(float(brief.climbspeed_kias), "knot").to("meter / second")
     v_cruise = Q_(float(brief.cruisespeed_ktas), "knot").to("meter / second")
+    loiter_speed_ratio = _resolve_loiter_speed_ratio(cfg.flight.loiter_speed_ratio_to_cruise)
+    v_loiter = loiter_speed_ratio * v_cruise
     h_delta = Q_(max(float(brief.cruisealt_m) - float(brief.climbalt_m), 0.0), "meter")
 
     t_climb = (h_delta / climb_rate).to("second")
@@ -4214,7 +4257,7 @@ def _converged_summary_text(
     t_takeoff = Q_(1.0, "minute").to("second")
     t_loiter = Q_(15.0, "minute").to("second")
     t_landing = Q_(1.0, "minute").to("second")
-    r_loiter = (v_cruise * t_loiter).to("meter")
+    r_loiter = (v_loiter * t_loiter).to("meter")
     range_total = Q_(float(cfg.hydrogen.range_total_m), "meter")
     r_cruise = (range_total - r_climb - r_loiter).to("meter")
     if float(r_cruise.to("meter").magnitude) < 0.0:
@@ -4238,7 +4281,7 @@ def _converged_summary_text(
     sizing_phase_name, sizing_phase, _ = _max_phase_fc_sizing_power(
         {
             name: phases[name]
-            for name in ("takeoff", "climb", "cruise", "cruise_charger")
+            for name in ("takeoff", "climb", "cruise", "loiter", "cruise_charger")
             if name in phases
         }
     )
@@ -4271,6 +4314,7 @@ def _converged_summary_text(
     takeoff = phases.get("takeoff")
     climb = phases.get("climb")
     cruise = phases.get("cruise")
+    loiter = phases.get("loiter")
 
     def _phase_row(
         phase_name: str,
@@ -4280,6 +4324,7 @@ def _converged_summary_text(
         p_batt_w: float,
         p_comp_w: float,
         p_cooling_w: float,
+        mdot_h2_kgps: float,
     ) -> str:
         return (
             f"{phase_name:<10} {duration_min:>9.2f}"
@@ -4288,16 +4333,15 @@ def _converged_summary_text(
             f"{_fmt_kw(p_batt_w / 1000.0, 14)}"
             f"{_fmt_kw(p_comp_w / 1000.0, 17)}"
             f"{_fmt_kw(p_cooling_w / 1000.0, 14)}"
+            f"{_fmt_gps(mdot_h2_kgps * 1000.0, 12)}"
         )
 
-    cruise_total_w = float(cruise.p_total_w) if cruise is not None else math.nan
-    cruise_fc_w = float(cruise.p_fuelcell_w) if cruise is not None else math.nan
-    cruise_comp_w = float(cruise.p_comp_w) if cruise is not None else math.nan
-    cruise_cooling_w = float(cruise.p_cooling_w) if cruise is not None else math.nan
-
+    mdot_taxi_kgps = 0.10 * float(climb.mdot_h2_kgps) if climb is not None else math.nan
     phase_rows = [
-        _phase_row("ready", phase_times_min["ready"], mass.p_fuelcell_engine_w, mass.p_fuelcell_engine_w, 0.0, 0.0, 0.0),
-        _phase_row("taxi", phase_times_min["taxi"], mass.p_fuelcell_taxing_w, mass.p_fuelcell_taxing_w, 0.0, 0.0, 0.0),
+        _phase_row("ready", phase_times_min["ready"], mass.p_fuelcell_engine_w, mass.p_fuelcell_engine_w, 0.0, 0.0, 0.0, 0.0),
+        _phase_row(
+            "taxi", phase_times_min["taxi"], mass.p_fuelcell_taxing_w, mass.p_fuelcell_taxing_w, 0.0, 0.0, 0.0, mdot_taxi_kgps
+        ),
         _phase_row(
             "takeoff",
             phase_times_min["takeoff"],
@@ -4306,6 +4350,7 @@ def _converged_summary_text(
             float(takeoff.p_battery_w) if takeoff is not None else math.nan,
             float(takeoff.p_comp_w) if takeoff is not None else math.nan,
             float(takeoff.p_cooling_w) if takeoff is not None else math.nan,
+            float(takeoff.mdot_h2_kgps) if takeoff is not None else math.nan,
         ),
         _phase_row(
             "climb",
@@ -4315,6 +4360,7 @@ def _converged_summary_text(
             float(climb.p_battery_w) if climb is not None else math.nan,
             float(climb.p_comp_w) if climb is not None else math.nan,
             float(climb.p_cooling_w) if climb is not None else math.nan,
+            float(climb.mdot_h2_kgps) if climb is not None else math.nan,
         ),
         _phase_row(
             "cruise",
@@ -4324,20 +4370,22 @@ def _converged_summary_text(
             float(cruise.p_battery_w) if cruise is not None else math.nan,
             float(cruise.p_comp_w) if cruise is not None else math.nan,
             float(cruise.p_cooling_w) if cruise is not None else math.nan,
+            float(cruise.mdot_h2_kgps) if cruise is not None else math.nan,
         ),
         _phase_row(
             "loiter",
             phase_times_min["loiter"],
-            0.10 * cruise_total_w if math.isfinite(cruise_total_w) else math.nan,
-            0.10 * cruise_fc_w if math.isfinite(cruise_fc_w) else math.nan,
-            0.0,
-            0.10 * cruise_comp_w if math.isfinite(cruise_comp_w) else math.nan,
-            0.10 * cruise_cooling_w if math.isfinite(cruise_cooling_w) else math.nan,
+            float(loiter.p_total_w) if loiter is not None else math.nan,
+            float(loiter.p_fuelcell_w) if loiter is not None else math.nan,
+            float(loiter.p_battery_w) if loiter is not None else math.nan,
+            float(loiter.p_comp_w) if loiter is not None else math.nan,
+            float(loiter.p_cooling_w) if loiter is not None else math.nan,
+            float(loiter.mdot_h2_kgps) if loiter is not None else math.nan,
         ),
-        _phase_row("landing", phase_times_min["landing"], 0.0, 0.0, 0.0, 0.0, 0.0),
+        _phase_row("landing", phase_times_min["landing"], 0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
     ]
     phase_header = (
-        "Phase      Time[min]     Total[kW]    FC Stack[kW]   Battery[kW]   Compressor[kW]   Cooling[kW]"
+        "Phase      Time[min]     Total[kW]    FC Stack[kW]   Battery[kW]   Compressor[kW]   Cooling[kW]   mdot_H2[g/s]"
     )
     phase_rule = "-" * len(phase_header)
 
@@ -4447,13 +4495,14 @@ def _log_converged_state(
 
     climb = phases["climb"]
     cruise = phases["cruise"]
+    loiter = phases.get("loiter")
     takeoff = phases.get("takeoff")
     cruise_charger = phases.get("cruise_charger")
     max_p_comp_phase, max_p_comp_w = _max_phase_comp_power(phases)
     fc_rep_phase_name, _, fc_rep_power_w = _max_phase_fc_sizing_power(
         {
             name: phases[name]
-            for name in ("takeoff", "climb", "cruise", "cruise_charger")
+            for name in ("takeoff", "climb", "cruise", "loiter", "cruise_charger")
             if name in phases
         }
     )
@@ -4463,6 +4512,7 @@ def _log_converged_state(
     p_to_w = climb.p_total_w / mtom if mtom > 0 else math.nan
     takeoff_kw = takeoff.p_total_w / 1000.0 if takeoff is not None else math.nan
     cruise_kw = cruise.p_total_w / 1000.0
+    loiter_kw = loiter.p_total_w / 1000.0 if loiter is not None else math.nan
     climb_kw = climb.p_total_w / 1000.0
     p_charger_kw = cruise_charger.p_total_w / 1000.0 if cruise_charger is not None else math.nan
 
@@ -4472,7 +4522,7 @@ def _log_converged_state(
         f"  MTOM={mtom:,.0f} kg | Wing loading={wing_loading:,.2f} kg/m^2 | P/W(climb)={p_to_w:,.2f} W/kg",
     )
     logger.info(
-        f"  Phase power: climb={climb_kw:,.1f} kW | cruise={cruise_kw:,.1f} kW | "
+        f"  Phase power: climb={climb_kw:,.1f} kW | cruise={cruise_kw:,.1f} kW | loiter={loiter_kw:,.1f} kW | "
         f"takeoff={takeoff_kw:,.1f} kW | cruise+charger={p_charger_kw:,.1f} kW",
     )
     logger.info(

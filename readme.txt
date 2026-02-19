@@ -1,5 +1,5 @@
 run command:
-python app/main.py -i app/input_RIMP9_260213-0440.ini --outdir results/
+python app/main.py -i app/input_test_1/h2000_M0.3_R1000km_PL1000kg.ini --outdir app/input_test_1
 
 requirements:
 Create an environment and install dependencies:
