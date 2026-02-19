@@ -3690,9 +3690,9 @@ class OutputWriter:
             "ax.yaxis.set_major_formatter(FuncFormatter(lambda y, _: f\"{co.hp2kw(y) / TOW_kg:.3f}\"))\n"
             "ax.set_xlabel('Wing loading [kg/m$^2$]')\n"
             "ax.set_ylabel('Power-to-weight [kW/kg]')\n"
-            "ax.set_title('P/W vs W/S')\n"
+            "ax.set_title('Constraint Diagram')\n"
             "ax.legend(loc='center left', bbox_to_anchor=(1, 0.5), fontsize=8)\n"
-            "plt.tight_layout()\n"
+            # "plt.tight_layout()\n"
             "plt.show()\n"
         )
         code_quick_tw = (
