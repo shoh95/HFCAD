@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import configparser
+import csv
 import itertools
 import json
 import math
@@ -439,7 +440,7 @@ class HFCADGui(QMainWindow):
         self.mainpage_description_label: Optional[QLabel] = None
         self.mainpage_contact_label: Optional[QLabel] = None
         self._output_full_pixmap: Optional[QPixmap] = None
-        self._collected_txt_rows: List[Dict[str, float | int | str]] = []
+        self._collected_case_rows: List[Dict[str, float | int | str]] = []
         self._collected_numeric_columns: List[str] = []
         self._last_exported_excel: Optional[Path] = None
 
@@ -759,12 +760,14 @@ class HFCADGui(QMainWindow):
         self.const_value_edit = QLineEdit()
         self.const_add_btn = QPushButton("Add Constant Parameter")
         self.const_remove_btn = QPushButton("Remove Selected")
+        self.const_add_all_btn = QPushButton("Add All Non-Sweep")
         const_form.addWidget(QLabel("Parameter"), 0, 0)
         const_form.addWidget(self.const_param_combo, 0, 1)
         const_form.addWidget(QLabel("Value"), 0, 2)
         const_form.addWidget(self.const_value_edit, 0, 3)
         const_form.addWidget(self.const_add_btn, 0, 4)
         const_form.addWidget(self.const_remove_btn, 0, 5)
+        const_form.addWidget(self.const_add_all_btn, 0, 6)
         const_layout.addLayout(const_form)
 
         self.const_table = QTableWidget(0, 2)
@@ -835,15 +838,19 @@ class HFCADGui(QMainWindow):
         self.output_file_combo = NoWheelComboBox()
         self.output_refresh_btn = QPushButton("Refresh")
         self.output_update_notebook_btn = QPushButton("Update Selected Notebook")
-        self.output_export_excel_btn = QPushButton("Collect TXT -> Excel")
+        self.output_export_excel_btn = QPushButton("Export All Case Data -> Excel")
         self.output_file_path_label = QLabel("No output file selected.")
         self.output_file_path_label.setWordWrap(True)
         self.output_last_excel_label = QLabel("No Excel export yet.")
         self.output_last_excel_label.setWordWrap(True)
         self.output_plot_x_combo = NoWheelComboBox()
         self.output_plot_y_combo = NoWheelComboBox()
+        self.output_hold_param_combo = NoWheelComboBox()
+        self.output_hold_value_combo = NoWheelComboBox()
         self.output_plot_type_combo = NoWheelComboBox()
-        self.output_plot_type_combo.addItems(["scatter", "line"])
+        self.output_plot_type_combo.addItems(
+            ["function(mean)", "function(mean+minmax)", "scatter(raw)", "line(raw)"]
+        )
         self.output_plot_btn = QPushButton("Draw Graph")
 
         output_group_layout.addWidget(QLabel("Results Dir"), 0, 0)
@@ -865,6 +872,10 @@ class HFCADGui(QMainWindow):
         output_group_layout.addWidget(self.output_plot_y_combo, 5, 3)
         output_group_layout.addWidget(self.output_plot_type_combo, 5, 4)
         output_group_layout.addWidget(self.output_plot_btn, 5, 5)
+        output_group_layout.addWidget(QLabel("Hold Param"), 6, 0)
+        output_group_layout.addWidget(self.output_hold_param_combo, 6, 1, 1, 2)
+        output_group_layout.addWidget(QLabel("Hold Value"), 6, 3)
+        output_group_layout.addWidget(self.output_hold_value_combo, 6, 4, 1, 2)
         output_layout.addWidget(output_group)
 
         self.output_text = QPlainTextEdit()
@@ -931,6 +942,7 @@ class HFCADGui(QMainWindow):
         self.sweep_clear_link_btn.clicked.connect(self.on_clear_sweep_link_group)
         self.const_add_btn.clicked.connect(self.on_add_constant_parameter)
         self.const_remove_btn.clicked.connect(self.on_remove_constant_parameter)
+        self.const_add_all_btn.clicked.connect(self.on_add_all_constants_except_sweep)
         self.make_input_btn.clicked.connect(self.on_make_input_files)
         self.execute_btn.clicked.connect(self.on_execute_cases)
         self.stop_btn.clicked.connect(self.on_stop_run)
@@ -939,8 +951,9 @@ class HFCADGui(QMainWindow):
         self.output_file_combo.currentIndexChanged.connect(self.on_output_file_changed)
         self.output_refresh_btn.clicked.connect(self.on_refresh_outputs)
         self.output_update_notebook_btn.clicked.connect(self.on_update_selected_notebook)
-        self.output_export_excel_btn.clicked.connect(self.on_export_txt_metrics_to_excel)
+        self.output_export_excel_btn.clicked.connect(self.on_export_all_case_data_to_excel)
         self.output_plot_btn.clicked.connect(self.on_draw_collected_plot)
+        self.output_hold_param_combo.currentIndexChanged.connect(self.on_output_hold_parameter_changed)
         self.sweep_param_combo.currentTextChanged.connect(self.on_sweep_parameter_changed)
         self.mode_combo.currentTextChanged.connect(self.on_mode_changed)
         self.add_loaded_to_sweep_btn.clicked.connect(self.on_add_loaded_selection_to_sweep)
@@ -1167,7 +1180,7 @@ class HFCADGui(QMainWindow):
             self.on_results_dir_changed()
 
     def on_results_dir_changed(self) -> None:
-        self._collected_txt_rows = []
+        self._collected_case_rows = []
         self._collected_numeric_columns = []
         self._last_exported_excel = None
         self.output_last_excel_label.setText("No Excel export yet.")
@@ -1182,6 +1195,9 @@ class HFCADGui(QMainWindow):
 
     def on_output_file_changed(self, _: int = 0) -> None:
         self._refresh_output_preview()
+
+    def on_output_hold_parameter_changed(self, _: int = 0) -> None:
+        self._refresh_hold_value_combo()
 
     def on_update_selected_notebook(self) -> None:
         notebook_path = self._selected_output_file_path()
@@ -1201,8 +1217,8 @@ class HFCADGui(QMainWindow):
             return
 
         excel_path = str(self._last_exported_excel) if self._last_exported_excel else "<exported_excel_path>.xlsx"
-        x_metric = self.output_plot_x_combo.currentText().strip() or "<x_column>"
-        y_metric = self.output_plot_y_combo.currentText().strip() or "<y_column>"
+        x_metric = self._selected_metric_key(self.output_plot_x_combo) or "<x_column>"
+        y_metric = self._selected_metric_key(self.output_plot_y_combo) or "<y_column>"
 
         marker = "HFCAD GUI Auto Analysis"
         markdown_cell = {
@@ -1268,7 +1284,7 @@ class HFCADGui(QMainWindow):
         self._log(f"[output-notebook] updated notebook: {notebook_path}")
         self._refresh_output_preview()
 
-    def on_export_txt_metrics_to_excel(self) -> None:
+    def on_export_all_case_data_to_excel(self) -> None:
         if not OPENPYXL_AVAILABLE or Workbook is None:
             self._show_warning("openpyxl is not available. Install it to export Excel files.")
             return
@@ -1278,46 +1294,69 @@ class HFCADGui(QMainWindow):
             self._show_warning(f"Results output directory does not exist:\n{out_dir}")
             return
 
-        rows, numeric_columns = self._collect_txt_metrics_rows(out_dir)
+        rows, numeric_columns = self._collect_all_case_data_rows(out_dir)
         if not rows:
-            self._show_warning("No TXT-derived numeric data found in case output folders.")
+            self._show_warning("No case output directories found to export.")
             return
         if len(numeric_columns) <= 1:
-            self._show_warning("No numeric metrics were extracted from TXT files.")
+            self._show_warning("No numeric fields were extracted from case outputs.")
             return
 
-        excel_path = out_dir / f"collected_txt_metrics_{time.strftime('%Y%m%d-%H%M%S')}.xlsx"
+        excel_path = out_dir / f"all_case_data_{time.strftime('%Y%m%d-%H%M%S')}.xlsx"
         try:
-            self._write_rows_to_excel(rows, excel_path)
+            self._write_rows_to_excel(rows, excel_path, sheet_name="all_case_data")
         except Exception as exc:
             self._show_warning(f"Failed to export Excel file:\n{exc}")
             return
 
-        self._collected_txt_rows = rows
+        self._collected_case_rows = rows
         self._collected_numeric_columns = numeric_columns
         self._last_exported_excel = excel_path
         self.output_last_excel_label.setText(str(excel_path))
         self._refresh_plot_metric_combos()
         self._log(
-            f"[output-export] exported {len(rows)} rows with {len(numeric_columns)} numeric columns: {excel_path}"
+            f"[output-export] exported {len(rows)} case rows with "
+            f"{len(numeric_columns)} numeric columns: {excel_path}"
         )
+
+    def on_export_txt_metrics_to_excel(self) -> None:
+        # Backward-compatible alias for previous button/action wiring.
+        self.on_export_all_case_data_to_excel()
 
     def on_draw_collected_plot(self) -> None:
         if not MATPLOTLIB_AVAILABLE or self.output_plot_canvas is None or self.output_plot_figure is None:
             self._show_warning("Matplotlib plotting backend is not available.")
             return
-        if not self._collected_txt_rows:
-            self._show_warning("No collected TXT data. Export TXT metrics first.")
+        if not self._collected_case_rows:
+            self._show_warning("No collected case data. Export all case data first.")
             return
 
-        x_col = self.output_plot_x_combo.currentText().strip()
-        y_col = self.output_plot_y_combo.currentText().strip()
+        x_col = self._selected_metric_key(self.output_plot_x_combo)
+        y_col = self._selected_metric_key(self.output_plot_y_combo)
         if not x_col or not y_col:
             self._show_warning("Select X and Y columns for plotting.")
             return
 
+        hold_col = self._selected_metric_key(self.output_hold_param_combo)
+        hold_value_data = self.output_hold_value_combo.currentData()
+        hold_active = bool(hold_col)
+        hold_value: Optional[float] = None
+        if hold_active:
+            if not isinstance(hold_value_data, (int, float)):
+                self._show_warning("Select a numeric hold value.")
+                return
+            hold_value = float(hold_value_data)
+
         points = []
-        for row in self._collected_txt_rows:
+        for row in self._collected_case_rows:
+            if hold_active:
+                hold_row_value = row.get(hold_col)
+                if not isinstance(hold_row_value, (int, float)):
+                    continue
+                tol = max(1e-9, 1e-6 * max(1.0, abs(hold_value if hold_value is not None else 0.0)))
+                if abs(float(hold_row_value) - float(hold_value)) > tol:
+                    continue
+
             x_val = row.get(x_col)
             y_val = row.get(y_col)
             if isinstance(x_val, (int, float)) and isinstance(y_val, (int, float)):
@@ -1327,7 +1366,7 @@ class HFCADGui(QMainWindow):
             self._show_warning("No numeric data points found for the selected x/y columns.")
             return
 
-        plot_type = self.output_plot_type_combo.currentText().strip().lower()
+        plot_mode = self.output_plot_type_combo.currentText().strip().lower()
         points.sort(key=lambda p: p[0])
         x_values = [p[0] for p in points]
         y_values = [p[1] for p in points]
@@ -1335,22 +1374,52 @@ class HFCADGui(QMainWindow):
 
         self.output_plot_figure.clear()
         ax = self.output_plot_figure.add_subplot(111)
-        if plot_type == "line":
-            ax.plot(x_values, y_values, marker="o", linestyle="-")
+        if plot_mode.startswith("function"):
+            grouped: Dict[float, List[float]] = {}
+            for x_val, y_val, _ in points:
+                grouped.setdefault(x_val, []).append(y_val)
+
+            if len(grouped) < 2:
+                self._show_warning(
+                    f"Selected X parameter '{x_col}' has fewer than two unique values.\n"
+                    "Choose another X parameter for function analysis."
+                )
+                return
+
+            unique_x = sorted(grouped.keys())
+            y_mean = [sum(grouped[x]) / len(grouped[x]) for x in unique_x]
+            ax.plot(unique_x, y_mean, marker="o", linestyle="-", label="mean")
+
+            if "minmax" in plot_mode:
+                y_min = [min(grouped[x]) for x in unique_x]
+                y_max = [max(grouped[x]) for x in unique_x]
+                ax.fill_between(unique_x, y_min, y_max, alpha=0.20, label="min-max")
+
+            ax.set_title(
+                f"{y_col} = f({x_col}) [{len(unique_x)} unique X, {len(points)} cases]"
+            )
+            if len(unique_x) <= 20:
+                for x_val, y_val in zip(unique_x, y_mean):
+                    ax.annotate(f"{y_val:.3g}", (x_val, y_val), fontsize=7, alpha=0.85)
+            if "minmax" in plot_mode:
+                ax.legend(loc="best")
         else:
-            ax.scatter(x_values, y_values)
+            if plot_mode == "line(raw)":
+                ax.plot(x_values, y_values, marker="o", linestyle="-")
+            else:
+                ax.scatter(x_values, y_values)
+            ax.set_title(f"{y_col} vs {x_col} [{len(points)} cases, raw]")
+            if len(points) <= 20:
+                for x_val, y_val, label in zip(x_values, y_values, labels):
+                    ax.annotate(label, (x_val, y_val), fontsize=7, alpha=0.85)
+
         ax.set_xlabel(x_col)
         ax.set_ylabel(y_col)
-        ax.set_title(f"{y_col} vs {x_col} ({len(points)} cases)")
         ax.grid(True, alpha=0.25)
-
-        if len(points) <= 20:
-            for x_val, y_val, label in zip(x_values, y_values, labels):
-                ax.annotate(label, (x_val, y_val), fontsize=7, alpha=0.85)
-
         self.output_plot_figure.tight_layout()
         self.output_plot_canvas.draw_idle()
-        self._log(f"[output-graph] plotted {len(points)} points: y={y_col}, x={x_col}, type={plot_type}")
+        hold_text = f", hold={hold_col}={hold_value}" if hold_active and hold_value is not None else ""
+        self._log(f"[output-graph] plotted {len(points)} points: y={y_col}, x={x_col}, mode={plot_mode}{hold_text}")
 
     def _selected_output_file_path(self) -> Optional[Path]:
         file_data = self.output_file_combo.currentData()
@@ -1480,31 +1549,137 @@ class HFCADGui(QMainWindow):
         self.output_image_label.resize(scaled.size())
 
     def _refresh_plot_metric_combos(self) -> None:
-        metrics = list(self._collected_numeric_columns)
-        if "case_index" not in metrics:
-            metrics.insert(0, "case_index")
-        if not metrics:
-            return
-
-        current_x = self.output_plot_x_combo.currentText()
-        current_y = self.output_plot_y_combo.currentText()
+        ordered_metrics = self._ordered_plot_metrics()
+        current_x = self._selected_metric_key(self.output_plot_x_combo)
+        current_y = self._selected_metric_key(self.output_plot_y_combo)
+        current_hold = self._selected_metric_key(self.output_hold_param_combo)
 
         self.output_plot_x_combo.blockSignals(True)
         self.output_plot_y_combo.blockSignals(True)
+        self.output_hold_param_combo.blockSignals(True)
         self.output_plot_x_combo.clear()
         self.output_plot_y_combo.clear()
-        self.output_plot_x_combo.addItems(metrics)
-        self.output_plot_y_combo.addItems(metrics)
+        self.output_hold_param_combo.clear()
+        self.output_hold_param_combo.addItem("(No Hold)", "")
 
-        x_idx = self.output_plot_x_combo.findText(current_x) if current_x else -1
-        y_idx = self.output_plot_y_combo.findText(current_y) if current_y else -1
+        if not ordered_metrics:
+            self.output_plot_x_combo.blockSignals(False)
+            self.output_plot_y_combo.blockSignals(False)
+            self.output_hold_param_combo.blockSignals(False)
+            self._refresh_hold_value_combo()
+            return
+
+        for metric in ordered_metrics:
+            self.output_plot_x_combo.addItem(metric, metric)
+            self.output_plot_y_combo.addItem(metric, metric)
+            self.output_hold_param_combo.addItem(metric, metric)
+
+        x_idx = self._find_combo_data_index(self.output_plot_x_combo, current_x)
+        y_idx = self._find_combo_data_index(self.output_plot_y_combo, current_y)
+        h_idx = self._find_combo_data_index(self.output_hold_param_combo, current_hold)
         self.output_plot_x_combo.setCurrentIndex(x_idx if x_idx >= 0 else 0)
-        default_y = y_idx if y_idx >= 0 else (1 if len(metrics) > 1 else 0)
-        self.output_plot_y_combo.setCurrentIndex(default_y)
+        self.output_plot_y_combo.setCurrentIndex(y_idx if y_idx >= 0 else (1 if len(ordered_metrics) > 1 else 0))
+        self.output_hold_param_combo.setCurrentIndex(h_idx if h_idx >= 0 else 0)
+
         self.output_plot_x_combo.blockSignals(False)
         self.output_plot_y_combo.blockSignals(False)
+        self.output_hold_param_combo.blockSignals(False)
+        self._refresh_hold_value_combo()
 
-    def _collect_txt_metrics_rows(self, out_dir: Path) -> Tuple[List[Dict[str, float | int | str]], List[str]]:
+    def _ordered_plot_metrics(self) -> List[str]:
+        metric_set = set(self._collected_numeric_columns)
+        if "case_index" not in metric_set:
+            metric_set.add("case_index")
+        if not metric_set:
+            return []
+
+        sweep_first: List[str] = []
+        seen = set()
+        for sp in self.sweep_parameters:
+            metric = self._resolve_sweep_metric_column(sp, metric_set)
+            if metric and metric not in seen:
+                sweep_first.append(metric)
+                seen.add(metric)
+
+        remaining = sorted(m for m in metric_set if m not in seen)
+        return sweep_first + remaining
+
+    def _resolve_sweep_metric_column(self, sweep: SweepParameter, metric_set: set[str]) -> Optional[str]:
+        try:
+            section, key = split_parameter(sweep.name)
+        except ValueError:
+            section, key = "", sweep.name
+
+        candidates: List[str] = []
+        if section:
+            candidates.append(
+                f"ini.case.{self._safe_metric_name(section)}.{self._safe_metric_name(key)}"
+            )
+        if sweep.abbreviation.strip():
+            candidates.append(f"case_token.{self._safe_metric_name(sweep.abbreviation)}")
+        candidates.append(f"case_token.{self._safe_metric_name(key)}")
+
+        for cand in candidates:
+            if cand in metric_set:
+                return cand
+        return None
+
+    @staticmethod
+    def _find_combo_data_index(combo: QComboBox, data_value: str) -> int:
+        if not data_value:
+            return -1
+        for i in range(combo.count()):
+            if str(combo.itemData(i) or "") == data_value:
+                return i
+        return -1
+
+    @staticmethod
+    def _selected_metric_key(combo: QComboBox) -> str:
+        data = combo.currentData()
+        if data is None:
+            return combo.currentText().strip()
+        return str(data).strip()
+
+    def _refresh_hold_value_combo(self) -> None:
+        hold_col = self._selected_metric_key(self.output_hold_param_combo)
+        prev_value = self.output_hold_value_combo.currentData()
+
+        self.output_hold_value_combo.blockSignals(True)
+        self.output_hold_value_combo.clear()
+
+        if not hold_col:
+            self.output_hold_value_combo.setEnabled(False)
+            self.output_hold_value_combo.addItem("(All)", None)
+            self.output_hold_value_combo.blockSignals(False)
+            return
+
+        unique_values = sorted(
+            {
+                float(row[hold_col])
+                for row in self._collected_case_rows
+                if hold_col in row and isinstance(row.get(hold_col), (int, float))
+            }
+        )
+        if not unique_values:
+            self.output_hold_value_combo.setEnabled(False)
+            self.output_hold_value_combo.addItem("(No Values)", None)
+            self.output_hold_value_combo.blockSignals(False)
+            return
+
+        self.output_hold_value_combo.setEnabled(True)
+        for value in unique_values:
+            self.output_hold_value_combo.addItem(fmt_float_for_ini(value), value)
+
+        target_idx = -1
+        if isinstance(prev_value, (int, float)):
+            for i, value in enumerate(unique_values):
+                if abs(float(value) - float(prev_value)) <= max(1e-9, 1e-6 * max(1.0, abs(float(value)))):
+                    target_idx = i
+                    break
+        self.output_hold_value_combo.setCurrentIndex(target_idx if target_idx >= 0 else 0)
+        self.output_hold_value_combo.blockSignals(False)
+
+    def _collect_all_case_data_rows(self, out_dir: Path) -> Tuple[List[Dict[str, float | int | str]], List[str]]:
         rows: List[Dict[str, float | int | str]] = []
         numeric_columns: set[str] = {"case_index"}
         case_dirs = sorted((p for p in out_dir.iterdir() if p.is_dir()), key=lambda p: p.name)
@@ -1515,18 +1690,46 @@ class HFCADGui(QMainWindow):
                 "case_dir": str(case_dir),
                 "case_index": case_index,
             }
+            row["file_count"] = sum(1 for p in case_dir.rglob("*") if p.is_file())
+            numeric_columns.add("file_count")
+
+            for tok_name, tok_value in self._extract_case_name_numeric_tokens(case_dir.name).items():
+                col_name = f"case_token.{tok_name}"
+                row[col_name] = tok_value
+                numeric_columns.add(col_name)
+
+            ini_files = sorted(case_dir.rglob("*.ini"))
+            for ini_path in ini_files:
+                prefix = self._metric_file_prefix(case_dir, ini_path)
+                parsed_ini = self._extract_ini_metrics(ini_path)
+                for key, value in parsed_ini.items():
+                    col_name = f"ini.{prefix}.{key}" if prefix else f"ini.{key}"
+                    row[col_name] = value
+                    if self._is_numeric_scalar(value):
+                        numeric_columns.add(col_name)
+
             txt_files = sorted(case_dir.rglob("*.txt"))
             for txt_path in txt_files:
-                relative_prefix = self._safe_metric_name(str(txt_path.relative_to(case_dir).with_suffix("")))
+                prefix = self._metric_file_prefix(case_dir, txt_path)
                 try:
                     text = txt_path.read_text(encoding="utf-8", errors="replace")
                 except Exception:
                     continue
-                parsed = self._extract_numeric_metrics_from_text(text)
-                for key, value in parsed.items():
-                    col_name = f"{relative_prefix}.{key}" if relative_prefix else key
+                parsed_txt = self._extract_numeric_metrics_from_text(text)
+                for key, value in parsed_txt.items():
+                    col_name = f"txt.{prefix}.{key}" if prefix else f"txt.{key}"
                     row[col_name] = value
                     numeric_columns.add(col_name)
+
+            csv_files = sorted(case_dir.rglob("*.csv"))
+            for csv_path in csv_files:
+                prefix = self._metric_file_prefix(case_dir, csv_path)
+                parsed_csv = self._extract_csv_numeric_metrics(csv_path)
+                for key, value in parsed_csv.items():
+                    col_name = f"csv.{prefix}.{key}" if prefix else f"csv.{key}"
+                    row[col_name] = value
+                    if self._is_numeric_scalar(value):
+                        numeric_columns.add(col_name)
 
             rows.append(row)
 
@@ -1535,6 +1738,28 @@ class HFCADGui(QMainWindow):
     @staticmethod
     def _safe_metric_name(name: str) -> str:
         return re.sub(r"[^A-Za-z0-9]+", "_", name).strip("_").lower()
+
+    @classmethod
+    def _metric_file_prefix(cls, case_dir: Path, file_path: Path) -> str:
+        rel = file_path.relative_to(case_dir)
+        rel_no_suffix = rel.with_suffix("")
+        parts = list(rel_no_suffix.parts)
+        if not parts:
+            return ""
+
+        normalized_parts: List[str] = []
+        safe_case = cls._safe_metric_name(case_dir.name)
+        for i, part in enumerate(parts):
+            safe_part = cls._safe_metric_name(part)
+            if i == len(parts) - 1:
+                if safe_part in {safe_case, f"input_{safe_case}"}:
+                    safe_part = "case"
+                elif safe_case and safe_case in safe_part:
+                    replaced = safe_part.replace(safe_case, "case").strip("_")
+                    safe_part = replaced if replaced else "case"
+            if safe_part:
+                normalized_parts.append(safe_part)
+        return ".".join(normalized_parts)
 
     @classmethod
     def _extract_numeric_metrics_from_text(cls, text: str) -> Dict[str, float]:
@@ -1598,7 +1823,96 @@ class HFCADGui(QMainWindow):
         return metrics
 
     @staticmethod
-    def _write_rows_to_excel(rows: Sequence[Dict[str, float | int | str]], excel_path: Path) -> None:
+    def _is_numeric_scalar(value: object) -> bool:
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+    @staticmethod
+    def _parse_value(value: str) -> float | str:
+        raw = value.strip()
+        if raw == "":
+            return ""
+        normalized = re.sub(r"(?<=\d),(?=\d)", "", raw)
+        try:
+            return float(normalized)
+        except ValueError:
+            return raw
+
+    @classmethod
+    def _extract_ini_metrics(cls, ini_path: Path) -> Dict[str, float | str]:
+        cp = new_config_parser()
+        read_ok = cp.read(str(ini_path))
+        if not read_ok:
+            return {}
+
+        metrics: Dict[str, float | str] = {}
+        for section in cp.sections():
+            section_key = cls._safe_metric_name(section)
+            for key, value in cp[section].items():
+                safe_key = cls._safe_metric_name(key)
+                metrics[f"{section_key}.{safe_key}"] = cls._parse_value(value)
+        return metrics
+
+    @classmethod
+    def _extract_csv_numeric_metrics(cls, csv_path: Path) -> Dict[str, float | int]:
+        metrics: Dict[str, float | int] = {}
+        try:
+            with csv_path.open("r", encoding="utf-8", errors="replace", newline="") as f:
+                reader = csv.DictReader(f)
+                rows = list(reader)
+                fieldnames = list(reader.fieldnames or [])
+        except Exception:
+            return metrics
+
+        metrics["row_count"] = len(rows)
+        if not rows or not fieldnames:
+            return metrics
+
+        for field in fieldnames:
+            safe_field = cls._safe_metric_name(field)
+            if not safe_field:
+                continue
+            series: List[float] = []
+            for row in rows:
+                raw = (row.get(field) or "").strip()
+                parsed = cls._parse_value(raw)
+                if isinstance(parsed, (int, float)):
+                    series.append(float(parsed))
+
+            if not series:
+                continue
+            if len(series) == 1:
+                metrics[safe_field] = series[0]
+            else:
+                metrics[f"{safe_field}.mean"] = sum(series) / len(series)
+                metrics[f"{safe_field}.min"] = min(series)
+                metrics[f"{safe_field}.max"] = max(series)
+                metrics[f"{safe_field}.last"] = series[-1]
+
+        return metrics
+
+    @classmethod
+    def _extract_case_name_numeric_tokens(cls, case_name: str) -> Dict[str, float]:
+        metrics: Dict[str, float] = {}
+        for token in case_name.split("_"):
+            match = re.fullmatch(r"([A-Za-z]+)([-+]?\d+(?:\.\d+)?)", token.strip())
+            if not match:
+                continue
+            name = cls._safe_metric_name(match.group(1))
+            if not name:
+                continue
+            try:
+                metrics[name] = float(match.group(2))
+            except ValueError:
+                continue
+        return metrics
+
+    @staticmethod
+    def _write_rows_to_excel(
+        rows: Sequence[Dict[str, float | int | str]],
+        excel_path: Path,
+        *,
+        sheet_name: str = "all_case_data",
+    ) -> None:
         if Workbook is None:
             raise RuntimeError("openpyxl Workbook is not available")
         column_set = set()
@@ -1611,39 +1925,12 @@ class HFCADGui(QMainWindow):
 
         wb = Workbook()
         ws = wb.active
-        ws.title = "txt_metrics"
+        ws.title = sheet_name[:31] if sheet_name else "all_case_data"
         ws.append(columns)
         for row in rows:
             ws.append([row.get(col, "") for col in columns])
         ws.freeze_panes = "A2"
         wb.save(excel_path)
-
-    @staticmethod
-    def _read_output_preview_text(file_path: Path, max_bytes: int = 400_000) -> str:
-        try:
-            file_size = file_path.stat().st_size
-            with file_path.open("rb") as f:
-                raw = f.read(max_bytes + 1)
-        except Exception as exc:
-            return f"[output-read-error] {exc}"
-
-        if file_size == 0:
-            return "[empty file]"
-
-        if b"\x00" in raw[:4096]:
-            return (
-                "[binary-file] Preview is only available for text files.\n"
-                f"Path: {file_path}\n"
-                f"Size: {file_size} bytes"
-            )
-
-        text = raw[:max_bytes].decode("utf-8", errors="replace")
-        if file_size > max_bytes or len(raw) > max_bytes:
-            text += (
-                f"\n\n[preview-truncated] showing first {max_bytes} bytes of "
-                f"{file_size} bytes."
-            )
-        return text
 
     @staticmethod
     def _read_output_preview_text(file_path: Path, max_bytes: int = 400_000) -> str:
@@ -1923,6 +2210,7 @@ class HFCADGui(QMainWindow):
             self.sweep_table.setItem(i, 4, QTableWidgetItem("Yes" if sp.include_in_name else "No"))
             self.sweep_table.setItem(i, 5, QTableWidgetItem(sp.abbreviation))
             self.sweep_table.setItem(i, 6, QTableWidgetItem(sp.link_group))
+        self._refresh_plot_metric_combos()
 
     def on_add_constant_parameter(self) -> None:
         param = self.const_param_combo.currentText().strip()
@@ -1953,6 +2241,45 @@ class HFCADGui(QMainWindow):
             return
         del self.constant_parameters[row]
         self._refresh_constant_table()
+
+    def on_add_all_constants_except_sweep(self) -> None:
+        if not self.loaded_parameter_items:
+            self._show_warning("No loaded parameters available. Load a template or import a case first.")
+            return
+
+        sweep_names = {sp.name for sp in self.sweep_parameters}
+        existing_values = {cp.name: cp.value for cp in self.constant_parameters}
+
+        new_constants: List[ConstantParameter] = []
+        added = 0
+        kept_existing = 0
+        skipped_sweep = 0
+
+        for name, loaded_value in self.loaded_parameter_items:
+            if name in sweep_names:
+                skipped_sweep += 1
+                continue
+
+            if name in existing_values:
+                value = existing_values[name]
+                kept_existing += 1
+            else:
+                value = loaded_value
+                added += 1
+
+            new_constants.append(ConstantParameter(name=name, value=value))
+
+        if not new_constants:
+            self._show_warning("No non-sweep parameters available to add as constants.")
+            return
+
+        self.constant_parameters = new_constants
+        self._refresh_constant_table()
+        self._update_diff_summary()
+        self._log(
+            f"[constants-all] total={len(new_constants)}, added={added}, "
+            f"kept_existing={kept_existing}, skipped_sweep={skipped_sweep}"
+        )
 
     def _refresh_constant_table(self) -> None:
         self.const_table.setRowCount(len(self.constant_parameters))

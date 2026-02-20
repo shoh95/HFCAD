@@ -21,7 +21,7 @@ import time
 import math
 import logging
 from functools import lru_cache
-from dataclasses import dataclass, fields, replace
+from dataclasses import asdict, dataclass, fields, is_dataclass, replace
 from pathlib import Path
 from pprint import pformat
 from typing import Dict, Iterable, List, Optional, Tuple, get_args, get_origin
@@ -4124,6 +4124,84 @@ class OutputWriter:
         summary_path.write_text(summary_text + "\n", encoding="utf-8")
 
     @staticmethod
+    def _to_jsonable(value: object) -> object:
+        if is_dataclass(value):
+            return OutputWriter._to_jsonable(asdict(value))
+        if isinstance(value, Path):
+            return str(value)
+        if isinstance(value, np.ndarray):
+            return [OutputWriter._to_jsonable(v) for v in value.tolist()]
+        if isinstance(value, np.generic):
+            return value.item()
+        if isinstance(value, dict):
+            return {str(k): OutputWriter._to_jsonable(v) for k, v in value.items()}
+        if isinstance(value, (list, tuple, set)):
+            return [OutputWriter._to_jsonable(v) for v in value]
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            return value
+        return str(value)
+
+    @classmethod
+    def _flatten_for_table(cls, value: object, prefix: str, out: Dict[str, object]) -> None:
+        normalized = cls._to_jsonable(value)
+        if isinstance(normalized, dict):
+            for key, sub_value in normalized.items():
+                child = f"{prefix}.{key}" if prefix else str(key)
+                cls._flatten_for_table(sub_value, child, out)
+            return
+        if isinstance(normalized, list):
+            if not normalized:
+                if prefix:
+                    out[prefix] = ""
+                return
+            for i, sub_value in enumerate(normalized):
+                child = f"{prefix}.{i}" if prefix else str(i)
+                cls._flatten_for_table(sub_value, child, out)
+            return
+        if prefix:
+            out[prefix] = normalized
+
+    def write_case_variable_exports(
+        self,
+        *,
+        phases: Dict[str, PhasePowerResult],
+        mass: MassBreakdown,
+        out_dir: Path,
+        input_path: Optional[Path] = None,
+        initial_cfg: Optional[DesignConfig] = None,
+        execution_time_s: Optional[float] = None,
+    ) -> None:
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        phase_payload = {
+            name: (asdict(res) if is_dataclass(res) else self._to_jsonable(res))
+            for name, res in phases.items()
+        }
+        mass_payload = asdict(mass) if is_dataclass(mass) else self._to_jsonable(mass)
+
+        payload = {
+            "meta": {
+                "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "input_path": str(input_path) if input_path is not None else "",
+                "output_path": str(out_dir),
+                "execution_time_s": float(execution_time_s) if execution_time_s is not None else None,
+            },
+            "config_used": asdict(self._cfg),
+            "config_initial": asdict(initial_cfg) if initial_cfg is not None else None,
+            "mass": mass_payload,
+            "phases": phase_payload,
+        }
+
+        json_payload = self._to_jsonable(payload)
+        json_path = out_dir / "all_case_variables.json"
+        json_path.write_text(json.dumps(json_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        flat_row: Dict[str, object] = {}
+        self._flatten_for_table(json_payload, "", flat_row)
+        flat_csv_path = out_dir / "all_case_variables_flat.csv"
+        pd.DataFrame([flat_row]).to_csv(flat_csv_path, index=False)
+
+    @staticmethod
     def _nb_source_lines(text: str) -> List[str]:
         if not text.endswith("\n"):
             text += "\n"
@@ -5074,6 +5152,14 @@ def main(argv: Optional[List[str]] = None) -> Optional[float]:
         out_dir=out_dir,
         input_path=input_path,
         initial_cfg=cfg,
+    )
+    writer.write_case_variable_exports(
+        phases=phases,
+        mass=mass,
+        out_dir=out_dir,
+        input_path=input_path,
+        initial_cfg=cfg,
+        execution_time_s=elapsed_time,
     )
     return elapsed_time
 
