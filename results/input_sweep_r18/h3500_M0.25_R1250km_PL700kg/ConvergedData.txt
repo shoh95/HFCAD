@@ -1,0 +1,88 @@
+=============================================================
+========================= CONVERGED =========================
+=============================================================
+Constraint sizing: ENABLED (min_combined_pw)
+Input W/S: 225.61 kg/m^2 (2,212.5 Pa)
+Input P/W [kW/kg]: takeoff 0.18089, climb 0.18058, cruise 0.06135, loiter 0.04908
+Converged P/W [kW/kg]: takeoff 0.24837, climb 0.24801, cruise 0.08986, loiter 0.07189
+-------------------------------------------------------------
+
+# Mission Time
+Climb time: 8.83 min (0.15 h)
+Cruise time: 233.36 min (3.89 h)
+Total flight time: 264.19 min (4.40 h)
+
+# Phase Power Breakdown
+Phase      Time[min]     Total[kW]    FC Stack[kW]   Battery[kW]   Compressor[kW]   Cooling[kW]   mdot_H2[g/s]
+--------------------------------------------------------------------------------------------------------------
+ready           0.00          82.8            82.8           0.0              0.0           0.0         0.0
+taxi            5.00         165.5           165.5           0.0              0.0           0.0         3.3
+takeoff         1.00       1,657.7         1,235.1         411.7             10.9         471.7        29.2
+climb           8.83       1,655.3         1,233.0         411.0             11.3         553.5        32.8
+cruise        233.36         599.8           562.8           0.0             36.9         249.5        15.3
+loiter         15.00         479.8           450.3           0.0             29.5         200.7        12.2
+landing         1.00           0.0             0.0           0.0              0.0           0.0         0.0
+
+Pcomp_max (solved phases): 36.9 kW (cruise)
+Pnet (climb): 1,495 kW
+Pelectricnet (climb): 1,644 kW
+eta_pt: 0.9031
+
+# Geometry
+Main Wing Area: 29.56 m^2
+Wingspan: 16.31 m
+Fuselage Length: 13.91 m
+Hydrogen Tank Length: 4.90 m
+Horizontal Tail Area: 4.65 m^2
+Vertical Tail Area: 4.74 m^2
+Horizontal Tail span: 4.57 m
+Vertical Tail span: 3.00 m
+Horizontal Tail X_Position: 11.86 m
+Vertical Tail X_Position: 11.36 m
+
+# Single Nacelle (1/2)
+Stack(1/2): 334 kg, Compressor: 19 kg, Humidifier: 101 kg, HX: 550 kg
+Fuelcell System(FCS; Stack+Compressor+Humidifier+Hx): 1,003 kg
+Representative FC phase: takeoff
+Specific Power of Fuelcell System: 0.621 kW/kg
+Stack dimension: dX=0.360 m, dY=0.322 m, dZ=0.322 m
+Heat Exchanger dimension: dX=1.788 m, dY=1.788 m, dZ=0.192 m
+
+# ALL Nacelles
+FCS_total: 2,007 kg
+PMAD: 143 kg
+Motors: 218 kg
+
+# Total Mass Breakdown
+-----------------------
+Powertrain (FCS_total+PMAD+Motors): 2,368 kg
+-----------------------
+Main Wing: 486 kg
+Horizontal Tail: 34 kg
+Vertical Tail: 61 kg
+Fuselage: 379 kg
+Landing gear(main): 243 kg
+Landing gear(nose): 65 kg
+Flight Control System: 366 kg
+Electric System: 300 kg
+Instruments: 95 kg
+Hydraulics: 80 kg
+Furnishing: 422 kg
+-----------------------
+Operating Empty Mass(OEM): 2,530 kg
+-----------------------
+Hydrogen Tank: 551 kg
+Hydrogen Fuel: 244.7 kg
+Battery: 280.7 kg
+-----------------------
+Payload: 700 kg
+-----------------------
+Maximum Takeoff Mass(MTOM): 6,674 kg
+-----------------------
+
+Wing loading (MTOM/S_wing): 225.74 kg/m^2
+Power-to-weight (maxPow/MTOM): 248.01 W/kg
+
+mdot_H2(cruise): 15.3 g/s
+Hydrogen Tank Volume: 10.5 m^3
+========================== END ============================== | Execution time: 59.6 seconds
