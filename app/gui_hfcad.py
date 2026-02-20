@@ -9,7 +9,9 @@ import difflib
 import itertools
 import json
 import math
+import os
 import re
+import signal
 import shutil
 import subprocess
 import sys
@@ -17,7 +19,7 @@ import time
 from concurrent.futures import CancelledError, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
-from threading import Event
+from threading import Event, Lock
 from typing import Dict, List, Optional, Sequence, Tuple
 
 try:
@@ -117,6 +119,7 @@ CASE_NAME_SAFE = re.compile(r"[^A-Za-z0-9_.-]+")
 LOG_SUMMARY_KEY = "__summary__"
 OUTPUT_PREVIEW_TEXT = 0
 OUTPUT_PREVIEW_IMAGE = 1
+OUTPUT_HOLD_SLOT_COUNT = 3
 CRUISE_ALT_SWEEP_PARAM = "constraint_brief.cruisealt_m"
 CLIMB_ALT_SWEEP_PARAM = "constraint_brief.climbalt_m"
 TURN_ALT_SWEEP_PARAM = "constraint_brief.turnalt_m"
@@ -299,6 +302,8 @@ class ExecutionWorker(QThread):
         self.timeout_sec = timeout_sec
         self.success_artifact = success_artifact.strip()
         self._stop_requested = Event()
+        self._active_lock = Lock()
+        self._active_procs: Dict[str, subprocess.Popen] = {}
 
     @property
     def stop_requested(self) -> bool:
@@ -307,6 +312,92 @@ class ExecutionWorker(QThread):
     def request_stop(self) -> None:
         self._stop_requested.set()
         self.log_signal.emit("[run] stop requested by user.")
+        terminated = self._terminate_active_processes(wait=False)
+        if terminated > 0:
+            self.log_signal.emit(f"[run] stop signal sent to {terminated} active case process(es).")
+
+    def _register_active_proc(self, case_name: str, proc: subprocess.Popen) -> None:
+        with self._active_lock:
+            self._active_procs[case_name] = proc
+
+    def _unregister_active_proc(self, case_name: str, proc: Optional[subprocess.Popen] = None) -> None:
+        with self._active_lock:
+            current = self._active_procs.get(case_name)
+            if current is None:
+                return
+            if proc is not None and current is not proc:
+                return
+            self._active_procs.pop(case_name, None)
+
+    def _terminate_process_tree(self, proc: subprocess.Popen, timeout_s: float = 5.0) -> None:
+        if proc.poll() is not None:
+            return
+
+        try:
+            if os.name == "nt":
+                proc.terminate()
+            else:
+                os.killpg(proc.pid, signal.SIGTERM)
+        except Exception:
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+
+        try:
+            proc.wait(timeout=timeout_s)
+            return
+        except subprocess.TimeoutExpired:
+            pass
+        except Exception:
+            return
+
+        try:
+            if os.name == "nt":
+                proc.kill()
+            else:
+                os.killpg(proc.pid, signal.SIGKILL)
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+
+        try:
+            proc.wait(timeout=timeout_s)
+        except Exception:
+            pass
+
+    def _signal_stop_process(self, proc: subprocess.Popen) -> bool:
+        if proc.poll() is not None:
+            return False
+
+        try:
+            if os.name == "nt":
+                proc.terminate()
+            else:
+                os.killpg(proc.pid, signal.SIGTERM)
+        except Exception:
+            try:
+                proc.terminate()
+            except Exception:
+                return False
+        return True
+
+    def _terminate_active_processes(self, *, wait: bool) -> int:
+        with self._active_lock:
+            active = list(self._active_procs.items())
+
+        terminated = 0
+        for _, proc in active:
+            if proc.poll() is not None:
+                continue
+            if wait:
+                self._terminate_process_tree(proc)
+                terminated += 1
+            elif self._signal_stop_process(proc):
+                terminated += 1
+        return terminated
 
     def run(self) -> None:
         self.run_dir.mkdir(parents=True, exist_ok=True)
@@ -411,31 +502,36 @@ class ExecutionWorker(QThread):
             log_file.flush()
 
             try:
-                proc = subprocess.Popen(
-                    cmd,
-                    stdout=log_file,
-                    stderr=subprocess.STDOUT,
-                )
+                if self._stop_requested.is_set():
+                    return_code = 130
+                    log_file.write("\n[stopped] Case skipped due to stop request before launch.\n")
+                    log_file.flush()
+                    artifact_ok = False
+                    is_ok = False
+                    self.log_signal.emit(f"[case] {case_name} -> FAIL (rc={return_code}, artifact_ok={artifact_ok})")
+                    return case_name, is_ok, return_code, log_path
+
+                popen_kwargs: Dict[str, object] = {
+                    "stdout": log_file,
+                    "stderr": subprocess.STDOUT,
+                }
+                if os.name == "nt":
+                    popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+                else:
+                    popen_kwargs["start_new_session"] = True
+
+                proc = subprocess.Popen(cmd, **popen_kwargs)
+                self._register_active_proc(case_name, proc)
                 while True:
                     if self._stop_requested.is_set():
                         return_code = 130
-                        proc.terminate()
-                        try:
-                            proc.wait(timeout=5)
-                        except subprocess.TimeoutExpired:
-                            proc.kill()
-                            proc.wait(timeout=5)
+                        self._terminate_process_tree(proc)
                         log_file.write("\n[stopped] Case stopped by user request.\n")
                         break
 
                     if deadline is not None and time.time() > deadline:
                         return_code = 124
-                        proc.terminate()
-                        try:
-                            proc.wait(timeout=5)
-                        except subprocess.TimeoutExpired:
-                            proc.kill()
-                            proc.wait(timeout=5)
+                        self._terminate_process_tree(proc)
                         log_file.write(f"\n[timeout] Case timed out after {self.timeout_sec} seconds.\n")
                         break
 
@@ -448,6 +544,8 @@ class ExecutionWorker(QThread):
             except Exception as exc:  # pragma: no cover - defensive runtime protection
                 return_code = 1
                 log_file.write(f"\n[error] Execution failed before process launch/finish: {exc}\n")
+            finally:
+                self._unregister_active_proc(case_name, proc)
 
         artifact_ok = False
         if self.success_artifact:
@@ -477,6 +575,7 @@ class HFCADGui(QMainWindow):
         self.constant_parameters: List[ConstantParameter] = []
         self.generated_cases: List[Tuple[Path, Dict[str, str]]] = []
         self.execution_worker: Optional[ExecutionWorker] = None
+        self._close_after_stop_requested = False
         self.completed_count = 0
         self.total_count = 0
         self._param_source_kind = ""
@@ -616,10 +715,13 @@ class HFCADGui(QMainWindow):
                 cp for cp in self.constant_parameters if cp.name in valid_params and cp.name not in sweep_names
             ]
 
-        self._enforce_cruise_altitude_sweep_sync()
-        self._refresh_sweep_table()
-        self._refresh_constant_table()
-        self._on_parameters_changed(refresh_sweep_editor=True, refresh_const_editor=True)
+        self._commit_parameter_change(
+            enforce_sync=True,
+            refresh_sweep_table=True,
+            refresh_constant_table=True,
+            refresh_sweep_editor=True,
+            refresh_const_editor=True,
+        )
 
     def _filter_query(self) -> str:
         return self.parameter_search_edit.text().strip().lower()
@@ -939,6 +1041,7 @@ class HFCADGui(QMainWindow):
             "If enabled, non-standard enum/bool values fail generated INI validation."
         )
         self.update_params_btn = QPushButton("Update Params")
+        self.refresh_all_btn = QPushButton("Refresh All")
         self.make_input_btn = QPushButton("Make Input Files")
         self.execute_btn = QPushButton("Execute Cases")
         self.stop_btn = QPushButton("Stop Run")
@@ -954,9 +1057,10 @@ class HFCADGui(QMainWindow):
         execute_layout.addWidget(QLabel("Success artifact"), 1, 0)
         execute_layout.addWidget(self.success_artifact_edit, 1, 1, 1, 3)
         execute_layout.addWidget(self.update_params_btn, 1, 4)
-        execute_layout.addWidget(self.make_input_btn, 1, 5)
-        execute_layout.addWidget(self.execute_btn, 1, 6)
-        execute_layout.addWidget(self.stop_btn, 1, 7)
+        execute_layout.addWidget(self.refresh_all_btn, 1, 5)
+        execute_layout.addWidget(self.make_input_btn, 1, 6)
+        execute_layout.addWidget(self.execute_btn, 1, 7)
+        execute_layout.addWidget(self.stop_btn, 1, 8)
         generator_layout.addWidget(execute_group)
 
         diff_group = QGroupBox("Major Differences Between Cases")
@@ -983,7 +1087,7 @@ class HFCADGui(QMainWindow):
         self.output_case_combo = NoWheelComboBox()
         self.output_file_combo = NoWheelComboBox()
         self.output_search_edit = QLineEdit()
-        self.output_search_edit.setPlaceholderText("Search cases/files...")
+        self.output_search_edit.setPlaceholderText("Search cases/files/parameters...")
         self.output_search_edit.setClearButtonEnabled(True)
         self.output_refresh_btn = QPushButton("Refresh")
         self.output_update_notebook_btn = QPushButton("Update Selected Notebook")
@@ -994,8 +1098,12 @@ class HFCADGui(QMainWindow):
         self.output_last_excel_label.setWordWrap(True)
         self.output_plot_x_combo = NoWheelComboBox()
         self.output_plot_y_combo = NoWheelComboBox()
-        self.output_hold_param_combo = NoWheelComboBox()
-        self.output_hold_value_combo = NoWheelComboBox()
+        self.output_hold_pairs: List[Tuple[NoWheelComboBox, NoWheelComboBox]] = []
+        for _ in range(OUTPUT_HOLD_SLOT_COUNT):
+            self.output_hold_pairs.append((NoWheelComboBox(), NoWheelComboBox()))
+        # Backward-compatible aliases for the first hold slot.
+        self.output_hold_param_combo = self.output_hold_pairs[0][0]
+        self.output_hold_value_combo = self.output_hold_pairs[0][1]
         self.output_plot_type_combo = NoWheelComboBox()
         self.output_plot_type_combo.addItems(
             ["function(mean)", "function(mean+minmax)", "scatter(raw)", "line(raw)"]
@@ -1023,10 +1131,12 @@ class HFCADGui(QMainWindow):
         output_group_layout.addWidget(self.output_plot_y_combo, 6, 3)
         output_group_layout.addWidget(self.output_plot_type_combo, 6, 4)
         output_group_layout.addWidget(self.output_plot_btn, 6, 5)
-        output_group_layout.addWidget(QLabel("Hold Param"), 7, 0)
-        output_group_layout.addWidget(self.output_hold_param_combo, 7, 1, 1, 2)
-        output_group_layout.addWidget(QLabel("Hold Value"), 7, 3)
-        output_group_layout.addWidget(self.output_hold_value_combo, 7, 4, 1, 2)
+        for hold_idx, (hold_param_combo, hold_value_combo) in enumerate(self.output_hold_pairs):
+            row = 7 + hold_idx
+            output_group_layout.addWidget(QLabel(f"Hold Param {hold_idx + 1}"), row, 0)
+            output_group_layout.addWidget(hold_param_combo, row, 1, 1, 2)
+            output_group_layout.addWidget(QLabel(f"Hold Value {hold_idx + 1}"), row, 3)
+            output_group_layout.addWidget(hold_value_combo, row, 4, 1, 2)
         output_layout.addWidget(output_group)
 
         self.output_text = QPlainTextEdit()
@@ -1095,6 +1205,7 @@ class HFCADGui(QMainWindow):
         self.const_remove_btn.clicked.connect(self.on_remove_constant_parameter)
         self.const_add_all_btn.clicked.connect(self.on_add_all_constants_except_sweep)
         self.update_params_btn.clicked.connect(self.on_update_params_from_tables)
+        self.refresh_all_btn.clicked.connect(self.on_refresh_all)
         self.make_input_btn.clicked.connect(self.on_make_input_files)
         self.execute_btn.clicked.connect(self.on_execute_cases)
         self.stop_btn.clicked.connect(self.on_stop_run)
@@ -1106,7 +1217,8 @@ class HFCADGui(QMainWindow):
         self.output_update_notebook_btn.clicked.connect(self.on_update_selected_notebook)
         self.output_export_excel_btn.clicked.connect(self.on_export_all_case_data_to_excel)
         self.output_plot_btn.clicked.connect(self.on_draw_collected_plot)
-        self.output_hold_param_combo.currentIndexChanged.connect(self.on_output_hold_parameter_changed)
+        for hold_param_combo, _ in self.output_hold_pairs:
+            hold_param_combo.currentIndexChanged.connect(self.on_output_hold_parameter_changed)
         self.sweep_param_combo.currentTextChanged.connect(self.on_sweep_parameter_changed)
         self.const_param_combo.currentTextChanged.connect(self.on_const_parameter_changed)
         self.const_value_combo.currentTextChanged.connect(self.const_value_edit.setText)
@@ -1134,6 +1246,10 @@ class HFCADGui(QMainWindow):
         import_folder_action = file_menu.addAction("Import Case Folder...")
         import_folder_action.setShortcut("Ctrl+Shift+I")
         import_folder_action.triggered.connect(self.on_import_case_folder)
+
+        refresh_all_action = file_menu.addAction("Refresh All")
+        refresh_all_action.setShortcut("F5")
+        refresh_all_action.triggered.connect(self.on_refresh_all)
 
         file_menu.addSeparator()
         exit_action = file_menu.addAction("Exit")
@@ -1224,8 +1340,10 @@ class HFCADGui(QMainWindow):
             ConstantParameter(name=name, value=value)
             for name, value in self.loaded_parameter_items
         ]
-        self._refresh_constant_table()
-        self._on_parameters_changed(refresh_const_editor=True)
+        self._commit_parameter_change(
+            refresh_constant_table=True,
+            refresh_const_editor=True,
+        )
 
         self._log(
             f"[import-case] Imported {len(self.loaded_parameter_items)} parameters from {case_path} "
@@ -1305,10 +1423,13 @@ class HFCADGui(QMainWindow):
                 non_numeric_varied += 1
                 self.constant_parameters.append(ConstantParameter(name=key, value=unique_values[0]))
 
-        self._enforce_cruise_altitude_sweep_sync()
-        self._refresh_sweep_table()
-        self._refresh_constant_table()
-        self._on_parameters_changed(refresh_sweep_editor=True, refresh_const_editor=True)
+        self._commit_parameter_change(
+            enforce_sync=True,
+            refresh_sweep_table=True,
+            refresh_constant_table=True,
+            refresh_sweep_editor=True,
+            refresh_const_editor=True,
+        )
         self._log(
             f"[import-folder] folder={folder_path}, files={len(case_dicts)}, "
             f"sweep_params={len(self.sweep_parameters)}, constants={len(self.constant_parameters)}, "
@@ -1346,21 +1467,40 @@ class HFCADGui(QMainWindow):
         self.output_last_excel_label.setText("No Excel export yet.")
         self.on_refresh_outputs()
 
+    def on_refresh_all(self) -> None:
+        self._refresh_parameter_views(
+            refresh_loaded_params=True,
+            refresh_parameter_selectors=True,
+            refresh_sweep_table=True,
+            refresh_constant_table=True,
+            refresh_sweep_editor=True,
+            refresh_const_editor=True,
+            clear_generated_cases=False,
+        )
+        self.on_refresh_outputs()
+        self._refresh_log_views(refresh_current=True)
+        self._log("[refresh] Refreshed all GUI views.")
+
     def on_refresh_outputs(self) -> None:
-        self._refresh_output_cases()
-        self._refresh_plot_metric_combos()
+        self._refresh_output_views(
+            refresh_cases=True,
+            refresh_plot_metrics=True,
+        )
 
     def on_output_case_changed(self, _: int = 0) -> None:
-        self._refresh_output_files()
+        self._refresh_output_views(refresh_files=True)
 
     def on_output_file_changed(self, _: int = 0) -> None:
-        self._refresh_output_preview()
+        self._refresh_output_views(refresh_preview=True)
 
     def on_output_search_changed(self, _: str = "") -> None:
-        self._refresh_output_cases()
+        self._refresh_output_views(
+            refresh_cases=True,
+            refresh_plot_metrics=True,
+        )
 
     def on_output_hold_parameter_changed(self, _: int = 0) -> None:
-        self._refresh_hold_value_combo()
+        self._refresh_output_views(refresh_hold_values=True)
 
     def on_update_selected_notebook(self) -> None:
         notebook_path = self._selected_output_file_path()
@@ -1445,7 +1585,7 @@ class HFCADGui(QMainWindow):
             return
 
         self._log(f"[output-notebook] updated notebook: {notebook_path}")
-        self._refresh_output_preview()
+        self._refresh_output_views(refresh_preview=True)
 
     def on_export_all_case_data_to_excel(self) -> None:
         if not OPENPYXL_AVAILABLE or Workbook is None:
@@ -1476,7 +1616,7 @@ class HFCADGui(QMainWindow):
         self._collected_numeric_columns = numeric_columns
         self._last_exported_excel = excel_path
         self.output_last_excel_label.setText(str(excel_path))
-        self._refresh_plot_metric_combos()
+        self._refresh_output_views(refresh_plot_metrics=True)
         self._log(
             f"[output-export] exported {len(rows)} case rows with "
             f"{len(numeric_columns)} numeric columns: {excel_path}"
@@ -1500,25 +1640,31 @@ class HFCADGui(QMainWindow):
             self._show_warning("Select X and Y columns for plotting.")
             return
 
-        hold_col = self._selected_metric_key(self.output_hold_param_combo)
-        hold_value_data = self.output_hold_value_combo.currentData()
-        hold_active = bool(hold_col)
-        hold_value: Optional[float] = None
-        if hold_active:
+        hold_filters: List[Tuple[str, float]] = []
+        for hold_idx, (hold_param_combo, hold_value_combo) in enumerate(self.output_hold_pairs):
+            hold_col = self._selected_metric_key(hold_param_combo)
+            if not hold_col:
+                continue
+            hold_value_data = hold_value_combo.currentData()
             if not isinstance(hold_value_data, (int, float)):
-                self._show_warning("Select a numeric hold value.")
+                self._show_warning(f"Select a numeric hold value for Hold {hold_idx + 1}.")
                 return
-            hold_value = float(hold_value_data)
+            hold_filters.append((hold_col, float(hold_value_data)))
 
         points = []
         for row in self._collected_case_rows:
-            if hold_active:
+            hold_matched = True
+            for hold_col, hold_value in hold_filters:
                 hold_row_value = row.get(hold_col)
                 if not isinstance(hold_row_value, (int, float)):
-                    continue
-                tol = max(1e-9, 1e-6 * max(1.0, abs(hold_value if hold_value is not None else 0.0)))
+                    hold_matched = False
+                    break
+                tol = max(1e-9, 1e-6 * max(1.0, abs(hold_value)))
                 if abs(float(hold_row_value) - float(hold_value)) > tol:
-                    continue
+                    hold_matched = False
+                    break
+            if not hold_matched:
+                continue
 
             x_val = row.get(x_col)
             y_val = row.get(y_col)
@@ -1581,7 +1727,10 @@ class HFCADGui(QMainWindow):
         ax.grid(True, alpha=0.25)
         self.output_plot_figure.tight_layout()
         self.output_plot_canvas.draw_idle()
-        hold_text = f", hold={hold_col}={hold_value}" if hold_active and hold_value is not None else ""
+        hold_text = ""
+        if hold_filters:
+            hold_parts = [f"{col}={fmt_float_for_ini(value)}" for col, value in hold_filters]
+            hold_text = f", holds={'; '.join(hold_parts)}"
         self._log(f"[output-graph] plotted {len(points)} points: y={y_col}, x={x_col}, mode={plot_mode}{hold_text}")
 
     def _selected_output_file_path(self) -> Optional[Path]:
@@ -1590,12 +1739,54 @@ class HFCADGui(QMainWindow):
             return None
         return Path(str(file_data)).expanduser()
 
-    def _refresh_output_cases(self) -> None:
+    def _refresh_output_views(
+        self,
+        *,
+        refresh_cases: bool = False,
+        refresh_files: bool = False,
+        refresh_preview: bool = False,
+        refresh_plot_metrics: bool = False,
+        refresh_hold_values: bool = False,
+        preferred_file_path: str = "",
+    ) -> None:
+        if refresh_cases:
+            refresh_files = True
+        if refresh_files:
+            refresh_preview = True
+        if refresh_plot_metrics:
+            refresh_hold_values = True
+
+        if refresh_cases:
+            self._refresh_output_cases(
+                preferred_file_path=preferred_file_path,
+                refresh_files=refresh_files,
+                refresh_preview=refresh_preview,
+            )
+        elif refresh_files:
+            self._refresh_output_files(
+                preferred_file_path=preferred_file_path,
+                refresh_preview=refresh_preview,
+            )
+        elif refresh_preview:
+            self._refresh_output_preview()
+
+        if refresh_plot_metrics:
+            self._refresh_plot_metric_combos(refresh_hold_values=refresh_hold_values)
+        elif refresh_hold_values:
+            self._refresh_hold_value_combo()
+
+    def _refresh_output_cases(
+        self,
+        preferred_file_path: str = "",
+        *,
+        refresh_files: bool = True,
+        refresh_preview: bool = True,
+    ) -> None:
         out_dir = Path(self.results_out_edit.text().strip()).expanduser()
         self.output_results_dir_label.setText(str(out_dir))
         current_case_dir = str(self.output_case_combo.currentData() or "")
-        current_file_path = str(self.output_file_combo.currentData() or "")
-        query = self.output_search_edit.text().strip().lower()
+        current_file_path = preferred_file_path or str(self.output_file_combo.currentData() or "")
+        query = self._output_search_query()
 
         self.output_case_combo.blockSignals(True)
         self.output_file_combo.blockSignals(True)
@@ -1611,6 +1802,9 @@ class HFCADGui(QMainWindow):
 
         case_dirs = sorted((p for p in out_dir.iterdir() if p.is_dir()), key=lambda p: p.name)
         filtered_case_dirs = [p for p in case_dirs if not query or self._fuzzy_match_text(query, p.name)]
+        if query and not filtered_case_dirs and self._query_matches_output_metric(query):
+            # Keep case browsing available when the query is targeting graph parameters.
+            filtered_case_dirs = case_dirs
         if not filtered_case_dirs:
             self.output_file_path_label.setText("No output file selected.")
             if query:
@@ -1632,12 +1826,16 @@ class HFCADGui(QMainWindow):
                 target_idx = idx
         self.output_case_combo.setCurrentIndex(target_idx)
         self.output_case_combo.blockSignals(False)
-        self._refresh_output_files(preferred_file_path=current_file_path)
+        if refresh_files:
+            self._refresh_output_files(
+                preferred_file_path=current_file_path,
+                refresh_preview=refresh_preview,
+            )
 
-    def _refresh_output_files(self, preferred_file_path: str = "") -> None:
+    def _refresh_output_files(self, preferred_file_path: str = "", *, refresh_preview: bool = True) -> None:
         case_dir_data = self.output_case_combo.currentData()
         case_dir = Path(str(case_dir_data)).expanduser() if case_dir_data else None
-        query = self.output_search_edit.text().strip().lower()
+        query = self._output_search_query()
         self.output_file_combo.blockSignals(True)
         self.output_file_combo.clear()
         self.output_file_combo.blockSignals(False)
@@ -1648,14 +1846,18 @@ class HFCADGui(QMainWindow):
             return
 
         files = sorted((p for p in case_dir.rglob("*") if p.is_file()), key=lambda p: str(p.relative_to(case_dir)))
+        filtered_files = files
         if query:
-            files = [
+            filtered_files = [
                 p
                 for p in files
                 if self._fuzzy_match_text(query, p.name)
                 or self._fuzzy_match_text(query, str(p.relative_to(case_dir)))
             ]
-        if not files:
+            if not filtered_files and self._query_matches_output_metric(query):
+                # Keep file browsing available when the query is targeting graph parameters.
+                filtered_files = files
+        if not filtered_files:
             self.output_file_path_label.setText("No output file selected.")
             if query:
                 self._show_output_text_preview(
@@ -1669,7 +1871,7 @@ class HFCADGui(QMainWindow):
         default_idx = 0
 
         self.output_file_combo.blockSignals(True)
-        for i, file_path in enumerate(files):
+        for i, file_path in enumerate(filtered_files):
             rel_path = str(file_path.relative_to(case_dir))
             self.output_file_combo.addItem(rel_path, str(file_path))
             if preferred_file_path and str(file_path) == preferred_file_path:
@@ -1678,7 +1880,8 @@ class HFCADGui(QMainWindow):
                 default_idx = i
         self.output_file_combo.setCurrentIndex(default_idx)
         self.output_file_combo.blockSignals(False)
-        self._refresh_output_preview()
+        if refresh_preview:
+            self._refresh_output_preview()
 
     def _refresh_output_preview(self) -> None:
         file_data = self.output_file_combo.currentData()
@@ -1731,43 +1934,52 @@ class HFCADGui(QMainWindow):
         self.output_image_label.setPixmap(scaled)
         self.output_image_label.resize(scaled.size())
 
-    def _refresh_plot_metric_combos(self) -> None:
-        ordered_metrics = self._ordered_plot_metrics()
+    def _refresh_plot_metric_combos(self, *, refresh_hold_values: bool = True) -> None:
+        ordered_metrics = self._filtered_output_metrics()
         current_x = self._selected_metric_key(self.output_plot_x_combo)
         current_y = self._selected_metric_key(self.output_plot_y_combo)
-        current_hold = self._selected_metric_key(self.output_hold_param_combo)
+        current_holds = [self._selected_metric_key(param_combo) for param_combo, _ in self.output_hold_pairs]
 
         self.output_plot_x_combo.blockSignals(True)
         self.output_plot_y_combo.blockSignals(True)
-        self.output_hold_param_combo.blockSignals(True)
+        for hold_param_combo, _ in self.output_hold_pairs:
+            hold_param_combo.blockSignals(True)
         self.output_plot_x_combo.clear()
         self.output_plot_y_combo.clear()
-        self.output_hold_param_combo.clear()
-        self.output_hold_param_combo.addItem("(No Hold)", "")
+        for hold_param_combo, _ in self.output_hold_pairs:
+            hold_param_combo.clear()
+            hold_param_combo.addItem("(No Hold)", "")
 
         if not ordered_metrics:
             self.output_plot_x_combo.blockSignals(False)
             self.output_plot_y_combo.blockSignals(False)
-            self.output_hold_param_combo.blockSignals(False)
-            self._refresh_hold_value_combo()
+            for hold_param_combo, _ in self.output_hold_pairs:
+                hold_param_combo.blockSignals(False)
+            if refresh_hold_values:
+                self._refresh_hold_value_combo()
             return
 
         for metric in ordered_metrics:
             self.output_plot_x_combo.addItem(metric, metric)
             self.output_plot_y_combo.addItem(metric, metric)
-            self.output_hold_param_combo.addItem(metric, metric)
+            for hold_param_combo, _ in self.output_hold_pairs:
+                hold_param_combo.addItem(metric, metric)
 
         x_idx = self._find_combo_data_index(self.output_plot_x_combo, current_x)
         y_idx = self._find_combo_data_index(self.output_plot_y_combo, current_y)
-        h_idx = self._find_combo_data_index(self.output_hold_param_combo, current_hold)
         self.output_plot_x_combo.setCurrentIndex(x_idx if x_idx >= 0 else 0)
         self.output_plot_y_combo.setCurrentIndex(y_idx if y_idx >= 0 else (1 if len(ordered_metrics) > 1 else 0))
-        self.output_hold_param_combo.setCurrentIndex(h_idx if h_idx >= 0 else 0)
+        for hold_idx, (hold_param_combo, _) in enumerate(self.output_hold_pairs):
+            current_hold = current_holds[hold_idx] if hold_idx < len(current_holds) else ""
+            h_idx = self._find_combo_data_index(hold_param_combo, current_hold)
+            hold_param_combo.setCurrentIndex(h_idx if h_idx >= 0 else 0)
 
         self.output_plot_x_combo.blockSignals(False)
         self.output_plot_y_combo.blockSignals(False)
-        self.output_hold_param_combo.blockSignals(False)
-        self._refresh_hold_value_combo()
+        for hold_param_combo, _ in self.output_hold_pairs:
+            hold_param_combo.blockSignals(False)
+        if refresh_hold_values:
+            self._refresh_hold_value_combo()
 
     def _ordered_plot_metrics(self) -> List[str]:
         metric_set = set(self._collected_numeric_columns)
@@ -1786,6 +1998,24 @@ class HFCADGui(QMainWindow):
 
         remaining = sorted(m for m in metric_set if m not in seen)
         return sweep_first + remaining
+
+    def _output_search_query(self) -> str:
+        return self.output_search_edit.text().strip().lower()
+
+    def _filtered_output_metrics(self) -> List[str]:
+        ordered_metrics = self._ordered_plot_metrics()
+        query = self._output_search_query()
+        if not query:
+            return ordered_metrics
+
+        matched_metrics = [metric for metric in ordered_metrics if self._fuzzy_match_text(query, metric)]
+        # Keep current behavior for non-metric searches (case/file focused).
+        return matched_metrics if matched_metrics else ordered_metrics
+
+    def _query_matches_output_metric(self, query: str) -> bool:
+        if not query:
+            return False
+        return any(self._fuzzy_match_text(query, metric) for metric in self._ordered_plot_metrics())
 
     def _resolve_sweep_metric_column(self, sweep: SweepParameter, metric_set: set[str]) -> Optional[str]:
         try:
@@ -1824,43 +2054,44 @@ class HFCADGui(QMainWindow):
         return str(data).strip()
 
     def _refresh_hold_value_combo(self) -> None:
-        hold_col = self._selected_metric_key(self.output_hold_param_combo)
-        prev_value = self.output_hold_value_combo.currentData()
+        for hold_param_combo, hold_value_combo in self.output_hold_pairs:
+            hold_col = self._selected_metric_key(hold_param_combo)
+            prev_value = hold_value_combo.currentData()
 
-        self.output_hold_value_combo.blockSignals(True)
-        self.output_hold_value_combo.clear()
+            hold_value_combo.blockSignals(True)
+            hold_value_combo.clear()
 
-        if not hold_col:
-            self.output_hold_value_combo.setEnabled(False)
-            self.output_hold_value_combo.addItem("(All)", None)
-            self.output_hold_value_combo.blockSignals(False)
-            return
+            if not hold_col:
+                hold_value_combo.setEnabled(False)
+                hold_value_combo.addItem("(All)", None)
+                hold_value_combo.blockSignals(False)
+                continue
 
-        unique_values = sorted(
-            {
-                float(row[hold_col])
-                for row in self._collected_case_rows
-                if hold_col in row and isinstance(row.get(hold_col), (int, float))
-            }
-        )
-        if not unique_values:
-            self.output_hold_value_combo.setEnabled(False)
-            self.output_hold_value_combo.addItem("(No Values)", None)
-            self.output_hold_value_combo.blockSignals(False)
-            return
+            unique_values = sorted(
+                {
+                    float(row[hold_col])
+                    for row in self._collected_case_rows
+                    if hold_col in row and isinstance(row.get(hold_col), (int, float))
+                }
+            )
+            if not unique_values:
+                hold_value_combo.setEnabled(False)
+                hold_value_combo.addItem("(No Values)", None)
+                hold_value_combo.blockSignals(False)
+                continue
 
-        self.output_hold_value_combo.setEnabled(True)
-        for value in unique_values:
-            self.output_hold_value_combo.addItem(fmt_float_for_ini(value), value)
+            hold_value_combo.setEnabled(True)
+            for value in unique_values:
+                hold_value_combo.addItem(fmt_float_for_ini(value), value)
 
-        target_idx = -1
-        if isinstance(prev_value, (int, float)):
-            for i, value in enumerate(unique_values):
-                if abs(float(value) - float(prev_value)) <= max(1e-9, 1e-6 * max(1.0, abs(float(value)))):
-                    target_idx = i
-                    break
-        self.output_hold_value_combo.setCurrentIndex(target_idx if target_idx >= 0 else 0)
-        self.output_hold_value_combo.blockSignals(False)
+            target_idx = -1
+            if isinstance(prev_value, (int, float)):
+                for i, value in enumerate(unique_values):
+                    if abs(float(value) - float(prev_value)) <= max(1e-9, 1e-6 * max(1.0, abs(float(value)))):
+                        target_idx = i
+                        break
+            hold_value_combo.setCurrentIndex(target_idx if target_idx >= 0 else 0)
+            hold_value_combo.blockSignals(False)
 
     def _collect_all_case_data_rows(self, out_dir: Path) -> Tuple[List[Dict[str, float | int | str]], List[str]]:
         rows: List[Dict[str, float | int | str]] = []
@@ -2246,16 +2477,17 @@ class HFCADGui(QMainWindow):
             )
             added += 1
 
-        sync_notes = self._enforce_cruise_altitude_sweep_sync()
-        self._refresh_sweep_table()
-        self._refresh_constant_table()
-        self._on_parameters_changed(refresh_const_editor=True)
+        self._commit_parameter_change(
+            enforce_sync=True,
+            log_sync_notes=True,
+            refresh_sweep_table=True,
+            refresh_constant_table=True,
+            refresh_const_editor=True,
+        )
         self._log(
             f"[loaded->sweep] added={added}, skipped_existing={skipped_existing}, "
             f"skipped_nonnumeric={skipped_nonnumeric}"
         )
-        for note in sync_notes:
-            self._log(f"[sweep-sync] {note}")
 
     def on_add_loaded_selection_to_constants(self) -> None:
         selected = self._selected_loaded_items()
@@ -2277,8 +2509,10 @@ class HFCADGui(QMainWindow):
                 self.constant_parameters[idx] = ConstantParameter(name=name, value=value)
             added_or_updated += 1
 
-        self._refresh_constant_table()
-        self._on_parameters_changed(refresh_const_editor=True)
+        self._commit_parameter_change(
+            refresh_constant_table=True,
+            refresh_const_editor=True,
+        )
         self._log(f"[loaded->constants] added_or_updated={added_or_updated}, skipped_sweep={skipped_sweep}")
 
     def on_add_sweep_parameter(self) -> None:
@@ -2321,13 +2555,14 @@ class HFCADGui(QMainWindow):
             )
         )
 
-        sync_notes = self._enforce_cruise_altitude_sweep_sync()
-        self._refresh_sweep_table()
-        self._refresh_constant_table()
         self.sweep_abbrev_edit.setText(self._default_abbreviation(param))
-        self._on_parameters_changed(refresh_const_editor=True)
-        for note in sync_notes:
-            self._log(f"[sweep-sync] {note}")
+        self._commit_parameter_change(
+            enforce_sync=True,
+            log_sync_notes=True,
+            refresh_sweep_table=True,
+            refresh_constant_table=True,
+            refresh_const_editor=True,
+        )
 
     def on_sweep_parameter_changed(self) -> None:
         param = self.sweep_param_combo.currentText().strip()
@@ -2462,13 +2697,14 @@ class HFCADGui(QMainWindow):
             self.sweep_parameters[row].link_group = link_group
 
         self.sweep_link_edit.setText(link_group)
-        sync_notes = self._enforce_cruise_altitude_sweep_sync()
-        self._refresh_sweep_table()
-        self._refresh_constant_table()
-        self._on_parameters_changed(refresh_const_editor=True)
+        self._commit_parameter_change(
+            enforce_sync=True,
+            log_sync_notes=True,
+            refresh_sweep_table=True,
+            refresh_constant_table=True,
+            refresh_const_editor=True,
+        )
         self._log(f"[sweep-link] auto assigned {link_group} to {len(rows)} parameter(s)")
-        for note in sync_notes:
-            self._log(f"[sweep-sync] {note}")
 
     def on_set_sweep_link_group(self) -> None:
         link_group = self.sweep_link_edit.text().strip()
@@ -2481,13 +2717,14 @@ class HFCADGui(QMainWindow):
             return
         for row in rows:
             self.sweep_parameters[row].link_group = link_group
-        sync_notes = self._enforce_cruise_altitude_sweep_sync()
-        self._refresh_sweep_table()
-        self._refresh_constant_table()
-        self._on_parameters_changed(refresh_const_editor=True)
+        self._commit_parameter_change(
+            enforce_sync=True,
+            log_sync_notes=True,
+            refresh_sweep_table=True,
+            refresh_constant_table=True,
+            refresh_const_editor=True,
+        )
         self._log(f"[sweep-link] set link_group={link_group} for {len(rows)} parameter(s)")
-        for note in sync_notes:
-            self._log(f"[sweep-sync] {note}")
 
     def on_clear_sweep_link_group(self) -> None:
         rows = self._selected_sweep_rows()
@@ -2499,13 +2736,14 @@ class HFCADGui(QMainWindow):
             if self.sweep_parameters[row].link_group:
                 self.sweep_parameters[row].link_group = ""
                 cleared += 1
-        sync_notes = self._enforce_cruise_altitude_sweep_sync()
-        self._refresh_sweep_table()
-        self._refresh_constant_table()
-        self._on_parameters_changed(refresh_const_editor=True)
+        self._commit_parameter_change(
+            enforce_sync=True,
+            log_sync_notes=True,
+            refresh_sweep_table=True,
+            refresh_constant_table=True,
+            refresh_const_editor=True,
+        )
         self._log(f"[sweep-link] cleared link group for {cleared} parameter(s)")
-        for note in sync_notes:
-            self._log(f"[sweep-sync] {note}")
 
     def on_remove_sweep_parameter(self) -> None:
         row = self.sweep_table.currentRow()
@@ -2513,12 +2751,13 @@ class HFCADGui(QMainWindow):
             self._show_warning("Select a sweep parameter row to remove.")
             return
         del self.sweep_parameters[row]
-        sync_notes = self._enforce_cruise_altitude_sweep_sync()
-        self._refresh_sweep_table()
-        self._refresh_constant_table()
-        self._on_parameters_changed(refresh_const_editor=True)
-        for note in sync_notes:
-            self._log(f"[sweep-sync] {note}")
+        self._commit_parameter_change(
+            enforce_sync=True,
+            log_sync_notes=True,
+            refresh_sweep_table=True,
+            refresh_constant_table=True,
+            refresh_const_editor=True,
+        )
 
     def on_sweep_table_item_changed(self, item: QTableWidgetItem) -> None:
         if self._updating_sweep_table:
@@ -2559,12 +2798,13 @@ class HFCADGui(QMainWindow):
             self._refresh_sweep_table()
             return
 
-        sync_notes = self._enforce_cruise_altitude_sweep_sync()
-        self._refresh_sweep_table()
-        self._refresh_constant_table()
-        self._on_parameters_changed(refresh_const_editor=True)
-        for note in sync_notes:
-            self._log(f"[sweep-sync] {note}")
+        self._commit_parameter_change(
+            enforce_sync=True,
+            log_sync_notes=True,
+            refresh_sweep_table=True,
+            refresh_constant_table=True,
+            refresh_const_editor=True,
+        )
 
     def on_sweep_table_include_changed(self, param_name: str, value_text: str) -> None:
         if self._updating_sweep_table:
@@ -2586,12 +2826,13 @@ class HFCADGui(QMainWindow):
         if not updated:
             return
 
-        sync_notes = self._enforce_cruise_altitude_sweep_sync()
-        self._refresh_sweep_table()
-        self._refresh_constant_table()
-        self._on_parameters_changed(refresh_const_editor=True)
-        for note in sync_notes:
-            self._log(f"[sweep-sync] {note}")
+        self._commit_parameter_change(
+            enforce_sync=True,
+            log_sync_notes=True,
+            refresh_sweep_table=True,
+            refresh_constant_table=True,
+            refresh_const_editor=True,
+        )
 
     def _refresh_sweep_table(self) -> None:
         current_row = self.sweep_table.currentRow()
@@ -2644,7 +2885,7 @@ class HFCADGui(QMainWindow):
         elif self.sweep_table.rowCount() > 0:
             fallback_row = min(max(current_row, 0), self.sweep_table.rowCount() - 1)
             self.sweep_table.setCurrentCell(fallback_row, target_col)
-        self._refresh_plot_metric_combos()
+        self._refresh_output_views(refresh_plot_metrics=True)
 
     def _loaded_value_for_parameter(self, param_name: str) -> str:
         for name, value in self.loaded_parameter_items:
@@ -2738,7 +2979,7 @@ class HFCADGui(QMainWindow):
             return
 
         refresh_editor = self.const_param_combo.currentText().strip() == param_name
-        self._on_parameters_changed(refresh_const_editor=refresh_editor)
+        self._commit_parameter_change(refresh_const_editor=refresh_editor)
 
     def on_add_constant_parameter(self) -> None:
         param = self.const_param_combo.currentText().strip()
@@ -2760,8 +3001,10 @@ class HFCADGui(QMainWindow):
         else:
             self.constant_parameters[idx] = ConstantParameter(name=param, value=value)
 
-        self._refresh_constant_table()
-        self._on_parameters_changed(refresh_const_editor=True)
+        self._commit_parameter_change(
+            refresh_constant_table=True,
+            refresh_const_editor=True,
+        )
 
     def on_remove_constant_parameter(self) -> None:
         row = self.const_table.currentRow()
@@ -2769,8 +3012,10 @@ class HFCADGui(QMainWindow):
             self._show_warning("Select a constant parameter row to remove.")
             return
         del self.constant_parameters[row]
-        self._refresh_constant_table()
-        self._on_parameters_changed(refresh_const_editor=True)
+        self._commit_parameter_change(
+            refresh_constant_table=True,
+            refresh_const_editor=True,
+        )
 
     def on_const_table_item_changed(self, item: QTableWidgetItem) -> None:
         if self._updating_const_table:
@@ -2793,9 +3038,66 @@ class HFCADGui(QMainWindow):
 
         param_name = self.constant_parameters[row].name
         self.constant_parameters[row].value = value
-        self._refresh_constant_table()
         refresh_editor = self.const_param_combo.currentText().strip() == param_name
-        self._on_parameters_changed(refresh_const_editor=refresh_editor)
+        self._commit_parameter_change(
+            refresh_constant_table=True,
+            refresh_const_editor=refresh_editor,
+        )
+
+    def _refresh_parameter_views(
+        self,
+        *,
+        refresh_loaded_params: bool = False,
+        refresh_parameter_selectors: bool = False,
+        refresh_sweep_table: bool = False,
+        refresh_constant_table: bool = False,
+        refresh_sweep_editor: bool = False,
+        refresh_const_editor: bool = False,
+        clear_generated_cases: bool = True,
+    ) -> None:
+        if refresh_loaded_params:
+            self._refresh_loaded_params_table()
+        if refresh_parameter_selectors:
+            self._refresh_parameter_selectors()
+        if refresh_sweep_table:
+            self._refresh_sweep_table()
+        if refresh_constant_table:
+            self._refresh_constant_table()
+        self._on_parameters_changed(
+            refresh_sweep_editor=refresh_sweep_editor,
+            refresh_const_editor=refresh_const_editor,
+            clear_generated_cases=clear_generated_cases,
+        )
+
+    def _commit_parameter_change(
+        self,
+        *,
+        enforce_sync: bool = False,
+        log_sync_notes: bool = False,
+        refresh_loaded_params: bool = False,
+        refresh_parameter_selectors: bool = False,
+        refresh_sweep_table: bool = False,
+        refresh_constant_table: bool = False,
+        refresh_sweep_editor: bool = False,
+        refresh_const_editor: bool = False,
+        clear_generated_cases: bool = True,
+    ) -> List[str]:
+        sync_notes: List[str] = []
+        if enforce_sync:
+            sync_notes = self._enforce_cruise_altitude_sweep_sync()
+        self._refresh_parameter_views(
+            refresh_loaded_params=refresh_loaded_params,
+            refresh_parameter_selectors=refresh_parameter_selectors,
+            refresh_sweep_table=refresh_sweep_table,
+            refresh_constant_table=refresh_constant_table,
+            refresh_sweep_editor=refresh_sweep_editor,
+            refresh_const_editor=refresh_const_editor,
+            clear_generated_cases=clear_generated_cases,
+        )
+        if log_sync_notes:
+            for note in sync_notes:
+                self._log(f"[sweep-sync] {note}")
+        return sync_notes
 
     def _on_parameters_changed(
         self,
@@ -2931,10 +3233,14 @@ class HFCADGui(QMainWindow):
 
         self.sweep_parameters = updated_sweeps
         self.constant_parameters = filtered_constants
-        warnings.extend(self._enforce_cruise_altitude_sweep_sync())
-        self._refresh_sweep_table()
-        self._refresh_constant_table()
-        self._on_parameters_changed(refresh_const_editor=True)
+        warnings.extend(
+            self._commit_parameter_change(
+                enforce_sync=True,
+                refresh_sweep_table=True,
+                refresh_constant_table=True,
+                refresh_const_editor=True,
+            )
+        )
         self._log(
             f"[params-update] sweep={len(self.sweep_parameters)}, constants={len(self.constant_parameters)}, "
             f"warnings={len(warnings)}"
@@ -2992,8 +3298,10 @@ class HFCADGui(QMainWindow):
             return
 
         self.constant_parameters = new_constants
-        self._refresh_constant_table()
-        self._on_parameters_changed(refresh_const_editor=True)
+        self._commit_parameter_change(
+            refresh_constant_table=True,
+            refresh_const_editor=True,
+        )
         self._log(
             f"[constants-all] total={len(new_constants)}, added={added}, "
             f"kept_existing={kept_existing}, skipped_sweep={skipped_sweep}"
@@ -3482,7 +3790,7 @@ class HFCADGui(QMainWindow):
         self.progress_label.setText(f"Running 0/{self.total_count} cases...")
         self.execute_btn.setEnabled(False)
         self._set_stop_button_running_state(True)
-        self._reset_log_views_for_new_run()
+        self._refresh_log_views(reset_for_new_run=True)
         self._log("")
         self._log(
             f"{'=' * 20} New Run {time.strftime('%Y-%m-%d %H:%M:%S')} {'=' * 20}"
@@ -3532,7 +3840,7 @@ class HFCADGui(QMainWindow):
         self.jobs_spin.setEnabled(mode == "parallel")
 
     def on_log_view_changed(self, _: int = 0) -> None:
-        self._refresh_log_view()
+        self._refresh_log_views(refresh_current=True)
 
     def _on_case_done(self, case_name: str, is_ok: bool, return_code: int, log_path: str) -> None:
         self.completed_count += 1
@@ -3542,7 +3850,7 @@ class HFCADGui(QMainWindow):
         else:
             self.progress_label.setText(f"Running {self.completed_count}/{self.total_count} cases...")
         self._log(f"[done] {case_name}: {status} (rc={return_code}) log={log_path}")
-        self._register_case_log(case_name, log_path)
+        self._refresh_log_views(register_case_name=case_name, register_log_path=log_path)
 
     def _on_run_finished(self, total: int, ok: int, fail: int, elapsed_s: float, summary_path: str) -> None:
         stopped = self.execution_worker.stop_requested if self.execution_worker is not None else False
@@ -3555,6 +3863,11 @@ class HFCADGui(QMainWindow):
         self._set_stop_button_running_state(False)
         self.execution_worker = None
         self.on_refresh_outputs()
+
+        if self._close_after_stop_requested:
+            self._close_after_stop_requested = False
+            self.close()
+            return
 
         if stopped:
             self._show_warning(
@@ -3603,6 +3916,26 @@ class HFCADGui(QMainWindow):
         self.log_view_combo.blockSignals(False)
         self.logs_text.clear()
 
+    def _refresh_log_views(
+        self,
+        *,
+        reset_for_new_run: bool = False,
+        register_case_name: str = "",
+        register_log_path: str = "",
+        refresh_current: bool = False,
+        refresh_registered_case: bool = True,
+    ) -> None:
+        if reset_for_new_run:
+            self._reset_log_views_for_new_run()
+
+        if register_case_name:
+            self._register_case_log(register_case_name, register_log_path)
+            if refresh_registered_case and self.log_view_combo.currentData() == register_case_name:
+                refresh_current = True
+
+        if refresh_current:
+            self._refresh_log_panel()
+
     def _register_case_log(self, case_name: str, log_path: str) -> None:
         log_file = Path(log_path).expanduser()
         if not log_path or not log_file.exists():
@@ -3612,10 +3945,7 @@ class HFCADGui(QMainWindow):
         if self.log_view_combo.findData(case_name) < 0:
             self.log_view_combo.addItem(case_name, case_name)
 
-        if self.log_view_combo.currentData() == case_name:
-            self._refresh_log_view()
-
-    def _refresh_log_view(self) -> None:
+    def _refresh_log_panel(self) -> None:
         selected_key = self.log_view_combo.currentData()
         if selected_key == LOG_SUMMARY_KEY:
             self.logs_text.setPlainText("\n".join(self._summary_log_lines))
@@ -3715,6 +4045,25 @@ class HFCADGui(QMainWindow):
 
     def _show_warning(self, message: str) -> None:
         QMessageBox.warning(self, "HFCAD GUI", message)
+
+    def closeEvent(self, event) -> None:  # type: ignore[override]
+        worker = self.execution_worker
+        if worker is None or not worker.isRunning():
+            event.accept()
+            return
+
+        first_request = not self._close_after_stop_requested
+        self._close_after_stop_requested = True
+        worker.request_stop()
+        self.stop_btn.setEnabled(False)
+        self.progress_label.setText(
+            f"Stopping before close... {self.completed_count}/{self.total_count} cases completed."
+        )
+        self._log("[shutdown] close requested while run is active; stopping worker.")
+
+        if first_request:
+            self._show_warning("Run stop requested. The window will close automatically after active cases stop.")
+        event.ignore()
 
 
 def main() -> int:
