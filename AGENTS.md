@@ -16,6 +16,8 @@ Common runs:
 - `conda activate aerofc` — Activate the Python environment used for this project.
 - `python app/HFCBattACDesign_SH_OOP_inpu_260117.py -i app/input_HFCAD_260126-2119.ini --outdir results/RIMP-03_260127-0440` — Main run command for the OOP sizing script and a standard input/output target.
   - The main script expects one INI input file and an output directory. It will create the output folder if it does not exist.
+- `python app/gui_hfcad.py` — Launch PyQt GUI for sweep-case generation and execution.
+  - Generates batch INI files from a template into a selected input folder, previews case differences, and runs cases sequentially/parallel with per-case logs under `results/_logs/run-YYYYMMDD-HHMMSS/`.
 
 If you add new scripts, document the exact command and expected outputs here.
 

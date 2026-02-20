@@ -1,0 +1,132 @@
+[command] /home/shoh95/anaconda3/envs/aerofc/bin/python /home/shoh95/Programming/HFCAD/app/main.py -i /home/shoh95/Programming/HFCAD/app/input_sweep_r22/h2000_M0.35_R1000km_PL350kg.ini --outdir /home/shoh95/Programming/HFCAD/results/input_sweep_r22
+[start] 2026-02-21 00:32:33
+
+Auto-widening W/S scan window for min_combined_pw: 1900.0..2600.0 -> 1725.0..2775.0 Pa (factor 1.500, lower_hit=True, upper_hit=False, min_on_edge=False).
+Auto-widening W/S scan window for min_combined_pw: 1725.0..2775.0 -> 1462.5..3037.5 Pa (factor 1.500, lower_hit=True, upper_hit=False, min_on_edge=False).
+ADRpy constraint sizing (min_combined_pw): W/S=2112.5 Pa (215.42 kg/m^2), P/W_TO=0.16953 kW/kg, P/W_climb=0.16894 kW/kg, P/W_cruise=0.12706 kW/kg
+Curve minimum (combined/combined): W/S=2112.5 Pa (215.42 kg/m^2), P/W=0.16953 kW/kg
+Curve minimum (takeoff/take-off): W/S=1462.5 Pa (149.13 kg/m^2), P/W=0.10196 kW/kg
+Curve minimum (climb/climb): W/S=2312.5 Pa (235.81 kg/m^2), P/W=0.16652 kW/kg
+Curve minimum (cruise/cruise): W/S=2312.5 Pa (235.81 kg/m^2), P/W=0.11922 kW/kg
+======================================================
+======================= ITER 1 =======================
+Fuel-cell system mass representative phase: cruise (P_fc_sys=902.844 kW).
+
+-----------------------
+ptotal_climb: 1,161 kW, mtom_est: 4,874 kg, mtom: 5,000 kg, residual: -125.68 kg
+
+MTOM update: initial_bracket_probe_1, relax=1.000 -> mtom_next=4,675.00 kg
+
+======================================================
+======================= ITER 2 =======================
+Fuel-cell system mass representative phase: cruise (P_fc_sys=844.158 kW).
+
+-----------------------
+ptotal_climb: 1,085 kW, mtom_est: 4,674 kg, mtom: 4,675 kg, residual: -0.72 kg
+
+
+CONVERGED
+
+CONVERGED STATE [MTOM iteration 2]
+  MTOM=4,674 kg | Wing loading=215.38 kg/m^2 | P/W(climb)=232.16 W/kg
+  Phase power: climb=1,085.2 kW | cruise=844.2 kW | loiter=675.3 kW | takeoff=1,088.8 kW | cruise+charger=844.2 kW
+  Power split (climb): FC=808.5 kW | Battery=269.5 kW | Compressor=7.2 kW | Cooling=338.0 kW | H2=20.013 g/s
+  Compressor max across phases: 27.2 kW (cruise)
+  FC representative phase (mass sizing): cruise (844.2 kW)
+  Mass summary: MTOM=4,674 kg | Powertrain=1,361 kg | Tank=403.1 kg | Fuel=179.1 kg | Battery=113.2 kg | Nacelle power density=0.75 kW/kg
+  Geometry: Main wing area=21.70 m^2 | Horizontal tail area=3.198 m^2 | Horizontal tail location=10.796 m | Vertical tail area=3.228 m^2 | Vertical tail location=10.439 m
+  Config: wing loading input=215.42 kg/m^2 | P/W TO/Cl/Cr/Lo=0.16953/0.16894/0.12706/0.10165 kW/kg
+
+=============================================================
+========================= CONVERGED =========================
+=============================================================
+Constraint sizing: ENABLED (min_combined_pw)
+Input W/S: 215.42 kg/m^2 (2,112.5 Pa)
+Input P/W [kW/kg]: takeoff 0.16953, climb 0.16894, cruise 0.12706, loiter 0.10165
+Converged P/W [kW/kg]: takeoff 0.23294, climb 0.23216, cruise 0.18060, loiter 0.14447
+-------------------------------------------------------------
+
+# Mission Time
+Climb time: 5.05 min (0.08 h)
+Cruise time: 127.33 min (2.12 h)
+Total flight time: 154.38 min (2.57 h)
+
+# Phase Power Breakdown
+Phase      Time[min]     Total[kW]    FC Stack[kW]   Battery[kW]   Compressor[kW]   Cooling[kW]   mdot_H2[g/s]
+--------------------------------------------------------------------------------------------------------------
+ready           0.00          54.3            54.3           0.0              0.0           0.0         0.0
+taxi            5.00         108.5           108.5           0.0              0.0           0.0         2.0
+takeoff         1.00       1,088.8           811.3         270.4              7.1         318.7        19.2
+climb           5.05       1,085.2           808.5         269.5              7.2         338.0        20.0
+cruise        127.33         844.2           817.0           0.0             27.2         341.4        20.5
+loiter         15.00         675.3           653.6           0.0             21.7         275.7        16.5
+landing         1.00           0.0             0.0           0.0              0.0           0.0         0.0
+
+Pcomp_max (solved phases): 27.2 kW (cruise)
+Pnet (climb): 980 kW
+Pelectricnet (climb): 1,078 kW
+eta_pt: 0.9031
+
+# Geometry
+Main Wing Area: 21.70 m^2
+Wingspan: 13.98 m
+Fuselage Length: 12.60 m
+Hydrogen Tank Length: 3.59 m
+Horizontal Tail Area: 3.20 m^2
+Vertical Tail Area: 3.23 m^2
+Horizontal Tail span: 3.79 m
+Vertical Tail span: 2.48 m
+Horizontal Tail X_Position: 10.80 m
+Vertical Tail X_Position: 10.44 m
+
+# Single Nacelle (1/2)
+Stack(1/2): 234 kg, Compressor: 47 kg, Humidifier: 76 kg, HX: 206 kg
+Fuelcell System(FCS; Stack+Compressor+Humidifier+Hx): 563 kg
+Representative FC phase: cruise
+Specific Power of Fuelcell System: 0.750 kW/kg
+Stack dimension: dX=0.363 m, dY=0.268 m, dZ=0.268 m
+Heat Exchanger dimension: dX=1.020 m, dY=1.020 m, dZ=0.222 m
+
+# ALL Nacelles
+FCS_total: 1,125 kg
+PMAD: 92 kg
+Motors: 143 kg
+
+# Total Mass Breakdown
+-----------------------
+Powertrain (FCS_total+PMAD+Motors): 1,361 kg
+-----------------------
+Main Wing: 325 kg
+Horizontal Tail: 20 kg
+Vertical Tail: 42 kg
+Fuselage: 392 kg
+Landing gear(main): 243 kg
+Landing gear(nose): 65 kg
+Flight Control System: 366 kg
+Electric System: 300 kg
+Instruments: 71 kg
+Hydraulics: 56 kg
+Furnishing: 390 kg
+-----------------------
+Operating Empty Mass(OEM): 2,268 kg
+-----------------------
+Hydrogen Tank: 403 kg
+Hydrogen Fuel: 179.1 kg
+Battery: 113.2 kg
+-----------------------
+Payload: 350 kg
+-----------------------
+Maximum Takeoff Mass(MTOM): 4,674 kg
+-----------------------
+
+Wing loading (MTOM/S_wing): 215.38 kg/m^2
+Power-to-weight (maxPow/MTOM): 232.16 W/kg
+
+mdot_H2(cruise): 20.5 g/s
+Hydrogen Tank Volume: 7.7 m^3
+========================== END ==============================
+
+
+=============================================================
+Execution time: 2.7 seconds
+=============================================================

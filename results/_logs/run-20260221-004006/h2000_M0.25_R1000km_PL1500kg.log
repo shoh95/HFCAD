@@ -1,0 +1,159 @@
+[command] /home/shoh95/anaconda3/envs/aerofc/bin/python /home/shoh95/Programming/HFCAD/app/main.py -i /home/shoh95/Programming/HFCAD/app/input_sweep_r22/h2000_M0.25_R1000km_PL1500kg.ini --outdir /home/shoh95/Programming/HFCAD/results/input_sweep_r22
+[start] 2026-02-21 00:40:06
+
+Auto-widening W/S scan window for min_combined_pw: 1900.0..2600.0 -> 1725.0..2775.0 Pa (factor 1.500, lower_hit=True, upper_hit=False, min_on_edge=False).
+Auto-widening W/S scan window for min_combined_pw: 1725.0..2775.0 -> 1462.5..3037.5 Pa (factor 1.500, lower_hit=True, upper_hit=False, min_on_edge=False).
+ADRpy constraint sizing (min_combined_pw): W/S=2062.5 Pa (210.32 kg/m^2), P/W_TO=0.16394 kW/kg, P/W_climb=0.16915 kW/kg, P/W_cruise=0.06497 kW/kg
+Curve minimum (combined/combined): W/S=2062.5 Pa (210.32 kg/m^2), P/W=0.16915 kW/kg
+Curve minimum (takeoff/take-off): W/S=1462.5 Pa (149.13 kg/m^2), P/W=0.10196 kW/kg
+Curve minimum (climb/climb): W/S=2312.5 Pa (235.81 kg/m^2), P/W=0.16577 kW/kg
+Curve minimum (cruise/cruise): W/S=2312.5 Pa (235.81 kg/m^2), P/W=0.06336 kW/kg
+======================================================
+======================= ITER 1 =======================
+Fuel-cell system mass representative phase: climb (P_fc_sys=873.463 kW).
+
+-----------------------
+ptotal_climb: 1,162 kW, mtom_est: 5,839 kg, mtom: 5,000 kg, residual: +839.49 kg
+
+MTOM update: initial_bracket_probe_1, relax=1.000 -> mtom_next=5,325.00 kg
+
+======================================================
+======================= ITER 2 =======================
+Fuel-cell system mass representative phase: climb (P_fc_sys=930.233 kW).
+
+-----------------------
+ptotal_climb: 1,238 kW, mtom_est: 6,031 kg, mtom: 5,325 kg, residual: +706.01 kg
+
+MTOM update: initial_bracket_probe_2, relax=1.000 -> mtom_next=5,650.00 kg
+
+======================================================
+======================= ITER 3 =======================
+Fuel-cell system mass representative phase: climb (P_fc_sys=987.008 kW).
+
+-----------------------
+ptotal_climb: 1,313 kW, mtom_est: 6,226 kg, mtom: 5,650 kg, residual: +576.11 kg
+
+MTOM update: newton_prebracket, relax=1.000 -> mtom_next=7,091.37 kg
+
+======================================================
+======================= ITER 4 =======================
+Fuel-cell system mass representative phase: climb (P_fc_sys=1238.810 kW).
+
+-----------------------
+ptotal_climb: 1,648 kW, mtom_est: 7,099 kg, mtom: 7,091 kg, residual: +7.15 kg
+
+MTOM update: newton_prebracket, relax=1.000 -> mtom_next=7,109.47 kg
+
+======================================================
+======================= ITER 5 =======================
+Fuel-cell system mass representative phase: climb (P_fc_sys=1241.973 kW).
+
+-----------------------
+ptotal_climb: 1,652 kW, mtom_est: 7,109 kg, mtom: 7,109 kg, residual: -0.53 kg
+
+
+CONVERGED
+
+CONVERGED STATE [MTOM iteration 5]
+  MTOM=7,109 kg | Wing loading=210.30 kg/m^2 | P/W(climb)=232.42 W/kg
+  Phase power: climb=1,652.3 kW | cruise=656.4 kW | loiter=525.1 kW | takeoff=1,601.2 kW | cruise+charger=656.4 kW
+  Power split (climb): FC=1,231.0 kW | Battery=410.3 kW | Compressor=11.0 kW | Cooling=522.2 kW | H2=30.805 g/s
+  Compressor max across phases: 21.1 kW (cruise)
+  FC representative phase (mass sizing): climb (1,242.0 kW)
+  Mass summary: MTOM=7,109 kg | Powertrain=2,180 kg | Tank=449.4 kg | Fuel=199.7 kg | Battery=171.4 kg | Nacelle power density=0.68 kW/kg
+  Geometry: Main wing area=33.80 m^2 | Horizontal tail area=6.437 m^2 | Horizontal tail location=10.705 m | Vertical tail area=6.725 m^2 | Vertical tail location=10.026 m
+  Config: wing loading input=210.32 kg/m^2 | P/W TO/Cl/Cr/Lo=0.16394/0.16915/0.06497/0.05198 kW/kg
+
+=============================================================
+========================= CONVERGED =========================
+=============================================================
+Constraint sizing: ENABLED (min_combined_pw)
+Input W/S: 210.32 kg/m^2 (2,062.5 Pa)
+Input P/W [kW/kg]: takeoff 0.16394, climb 0.16915, cruise 0.06497, loiter 0.05198
+Converged P/W [kW/kg]: takeoff 0.22524, climb 0.23242, cruise 0.09233, loiter 0.07386
+-------------------------------------------------------------
+
+# Mission Time
+Climb time: 5.05 min (0.08 h)
+Cruise time: 182.55 min (3.04 h)
+Total flight time: 209.60 min (3.49 h)
+
+# Phase Power Breakdown
+Phase      Time[min]     Total[kW]    FC Stack[kW]   Battery[kW]   Compressor[kW]   Cooling[kW]   mdot_H2[g/s]
+--------------------------------------------------------------------------------------------------------------
+ready           0.00          82.6            82.6           0.0              0.0           0.0         0.0
+taxi            5.00         165.2           165.2           0.0              0.0           0.0         3.1
+takeoff         1.00       1,601.2         1,193.1         397.7             10.5         468.1        28.2
+climb           5.05       1,652.3         1,231.0         410.3             11.0         522.2        30.8
+cruise        182.55         656.4           635.3           0.0             21.1         269.3        16.1
+loiter         15.00         525.1           508.2           0.0             16.9         216.6        12.9
+landing         1.00           0.0             0.0           0.0              0.0           0.0         0.0
+
+Pcomp_max (solved phases): 21.1 kW (cruise)
+Pnet (climb): 1,492 kW
+Pelectricnet (climb): 1,641 kW
+eta_pt: 0.9031
+
+# Geometry
+Main Wing Area: 33.80 m^2
+Wingspan: 17.44 m
+Fuselage Length: 13.01 m
+Hydrogen Tank Length: 4.00 m
+Horizontal Tail Area: 6.44 m^2
+Vertical Tail Area: 6.73 m^2
+Horizontal Tail span: 5.38 m
+Vertical Tail span: 3.57 m
+Horizontal Tail X_Position: 10.70 m
+Vertical Tail X_Position: 10.03 m
+
+# Single Nacelle (1/2)
+Stack(1/2): 350 kg, Compressor: 22 kg, Humidifier: 126 kg, HX: 412 kg
+Fuelcell System(FCS; Stack+Compressor+Humidifier+Hx): 910 kg
+Representative FC phase: climb
+Specific Power of Fuelcell System: 0.682 kW/kg
+Stack dimension: dX=0.378 m, dY=0.321 m, dZ=0.321 m
+Heat Exchanger dimension: dX=1.500 m, dY=1.500 m, dZ=0.205 m
+
+# ALL Nacelles
+FCS_total: 1,821 kg
+PMAD: 141 kg
+Motors: 218 kg
+
+# Total Mass Breakdown
+-----------------------
+Powertrain (FCS_total+PMAD+Motors): 2,180 kg
+-----------------------
+Main Wing: 556 kg
+Horizontal Tail: 45 kg
+Vertical Tail: 76 kg
+Fuselage: 374 kg
+Landing gear(main): 243 kg
+Landing gear(nose): 65 kg
+Flight Control System: 366 kg
+Electric System: 300 kg
+Instruments: 100 kg
+Hydraulics: 85 kg
+Furnishing: 400 kg
+-----------------------
+Operating Empty Mass(OEM): 2,609 kg
+-----------------------
+Hydrogen Tank: 449 kg
+Hydrogen Fuel: 199.7 kg
+Battery: 171.4 kg
+-----------------------
+Payload: 1,500 kg
+-----------------------
+Maximum Takeoff Mass(MTOM): 7,109 kg
+-----------------------
+
+Wing loading (MTOM/S_wing): 210.30 kg/m^2
+Power-to-weight (maxPow/MTOM): 232.42 W/kg
+
+mdot_H2(cruise): 16.1 g/s
+Hydrogen Tank Volume: 8.6 m^3
+========================== END ==============================
+
+
+=============================================================
+Execution time: 3.2 seconds
+=============================================================
