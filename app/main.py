@@ -3135,8 +3135,11 @@ class CoupledConstraintSizingRunner:
         if cs.scan_quiet:
             logger.setLevel(logging.WARNING)
 
+        BestScanResult = Tuple[float, DesignConfig, Dict[str, PhasePowerResult], MassBreakdown, ADRpyDesignPoint]
         rows: List[Dict[str, object]] = []
-        best: Optional[Tuple[float, DesignConfig, Dict[str, PhasePowerResult], MassBreakdown, ADRpyDesignPoint]] = None
+        best_global: Optional[BestScanResult] = None
+        best_near_seed: Optional[BestScanResult] = None
+        successful_samples: List[Tuple[float, float]] = []  # (W/S [Pa], MTOM [kg]) for converged points
         skipped_points = 0
         scanned_points = 0
         feasible_points = 0
@@ -3200,6 +3203,7 @@ class CoupledConstraintSizingRunner:
         seed_expand_pass = 0
         ws_seed_pa = float("nan")
         pw_seed_kw_per_kg = float("nan")
+        ws_seed_feasible = np.asarray([], dtype=float)
         wsmax_cleanstall_pa: Optional[float] = None
         while True:
             ws_grid_user = _wingloading_grid_from_bounds(ws_min_pa=ws_scan_min_pa, ws_max_pa=ws_scan_max_pa)
@@ -3216,6 +3220,7 @@ class CoupledConstraintSizingRunner:
                 raise RuntimeError("No feasible W/S points for selection='min_mtom' (check constraints / stall limit).")
 
             ws_feasible = np.asarray(ws_grid_user[idxs_seed], dtype=float)
+            ws_seed_feasible = np.asarray(ws_feasible, dtype=float)
             ws_feasible_min = float(np.min(ws_feasible))
             ws_feasible_max = float(np.max(ws_feasible))
             i_pw_seed = self._adr._select_index_min(combined_seed, valid_mask=valid_seed)
@@ -3280,6 +3285,7 @@ class CoupledConstraintSizingRunner:
         ws_full_span_pa = float(ws_scan_max_pa - ws_scan_min_pa)
 
         ws_seed_half_span_pa = max(float(cs.ws_step_pa), ws_full_span_pa * focus_span_fraction)
+        ws_seed_neighborhood_pa = float(ws_seed_half_span_pa)
         ws_grid_focus = _build_refine_grid(
             ws_center_pa=ws_seed_pa,
             ws_half_span_pa=ws_seed_half_span_pa,
@@ -3294,6 +3300,111 @@ class CoupledConstraintSizingRunner:
             float(np.max(ws_grid_focus)),
             int(ws_grid_focus.size),
         )
+        logger.info(
+            "min_mtom near-seed selection window: |W/S - W/S_seed| <= %.1f Pa",
+            ws_seed_neighborhood_pa,
+        )
+
+        def _is_near_seed(ws_pa: float) -> bool:
+            return abs(float(ws_pa) - float(ws_seed_pa)) <= float(ws_seed_neighborhood_pa) + 1e-9
+
+        def _candidate_rank(item: BestScanResult) -> Tuple[float, float, float]:
+            return (
+                float(item[0]),
+                abs(float(item[4].wing_loading_pa) - float(ws_seed_pa)),
+                float(item[4].wing_loading_pa),
+            )
+
+        def _build_nonuniform_seed_grid(
+            *,
+            ws_candidates_pa: np.ndarray,
+            ws_center_pa: float,
+            max_points: int,
+        ) -> np.ndarray:
+            """Sub-sample candidate W/S values with higher density near center."""
+            ws_sorted = np.asarray(np.unique(np.round(np.asarray(ws_candidates_pa, dtype=float), 9)), dtype=float)
+            if ws_sorted.size == 0:
+                return np.asarray([], dtype=float)
+
+            max_points_int = max(1, int(max_points))
+            if ws_sorted.size <= max_points_int:
+                return ws_sorted
+
+            ws_min = float(ws_sorted[0])
+            ws_max = float(ws_sorted[-1])
+            center = float(np.clip(float(ws_center_pa), ws_min, ws_max))
+            left_span = max(center - ws_min, 1e-9)
+            right_span = max(ws_max - center, 1e-9)
+
+            picked: List[float] = []
+            picked_keys: set[float] = set()
+
+            def _add_nearest(target_pa: float) -> None:
+                idx = int(np.argmin(np.abs(ws_sorted - float(target_pa))))
+                ws_val = float(ws_sorted[idx])
+                key = round(ws_val, 9)
+                if key in picked_keys:
+                    return
+                picked_keys.add(key)
+                picked.append(ws_val)
+
+            # Dense near center; progressively coarser outward.
+            fractions = [0.0, -0.06, 0.06, -0.14, 0.14, -0.26, 0.26, -0.40, 0.40, -0.58, 0.58, -0.78, 0.78, -1.0, 1.0]
+            for frac in fractions:
+                span = left_span if frac < 0.0 else right_span
+                _add_nearest(center + float(frac) * span)
+                if len(picked) >= max_points_int:
+                    break
+
+            # Fill remaining slots with broad quantiles for robustness.
+            if len(picked) < max_points_int:
+                for q in np.linspace(0.0, 1.0, max_points_int):
+                    _add_nearest(float(ws_min + float(q) * (ws_max - ws_min)))
+                    if len(picked) >= max_points_int:
+                        break
+
+            return np.asarray(np.unique(np.round(np.asarray(picked, dtype=float), 9)), dtype=float)
+
+        def _decide_local_seed_window() -> Tuple[float, float, float]:
+            """Choose local-search center/span/step from global-stage converged samples."""
+            if not successful_samples:
+                half_span = max(float(cs.ws_step_pa), float(ws_seed_neighborhood_pa) * 0.40)
+                step = max(float(cs.ws_step_pa) * 0.5, 1.0)
+                return float(ws_seed_pa), float(half_span), float(step)
+
+            near_pool = [(ws, mtom) for (ws, mtom) in successful_samples if _is_near_seed(ws)]
+            pool = near_pool if near_pool else successful_samples
+            pool_sorted = sorted(pool, key=lambda x: (float(x[1]), abs(float(x[0]) - float(ws_seed_pa)), float(x[0])))
+            top = pool_sorted[: min(5, len(pool_sorted))]
+
+            m0 = float(top[0][1])
+            ws_vals = np.asarray([float(ws) for (ws, _) in top], dtype=float)
+            dm = np.asarray([max(1.0, float(m) - m0) for (_, m) in top], dtype=float)
+            w = 1.0 / dm
+            ws_center = float(np.sum(w * ws_vals) / np.sum(w))
+            ws_center = float(
+                np.clip(
+                    ws_center,
+                    float(ws_seed_pa) - float(ws_seed_neighborhood_pa),
+                    float(ws_seed_pa) + float(ws_seed_neighborhood_pa),
+                )
+            )
+
+            spread = float(np.max(ws_vals) - np.min(ws_vals)) if ws_vals.size > 1 else float(cs.ws_step_pa)
+            if len(pool_sorted) > 1:
+                neighbor_gap = abs(float(pool_sorted[1][0]) - float(pool_sorted[0][0]))
+            else:
+                neighbor_gap = float(cs.ws_step_pa)
+
+            half_span = max(
+                float(cs.ws_step_pa),
+                min(
+                    float(ws_seed_neighborhood_pa),
+                    max(2.0 * float(cs.ws_step_pa), 0.75 * spread + neighbor_gap),
+                ),
+            )
+            step = max(float(cs.ws_step_pa) * 0.5, 1.0)
+            return float(ws_center), float(half_span), float(step)
 
         def _scan_ws_grid(
             *,
@@ -3302,7 +3413,8 @@ class CoupledConstraintSizingRunner:
             stage: str,
             ws_center_pa: Optional[float] = None,
         ) -> None:
-            nonlocal best
+            nonlocal best_global
+            nonlocal best_near_seed
             nonlocal mtom_seed
             nonlocal p_seed
             nonlocal skipped_points
@@ -3385,6 +3497,7 @@ class CoupledConstraintSizingRunner:
                             "scan_stage": stage,
                             "scan_pass": int(pass_id),
                             "wing_loading_pa": dp.wing_loading_pa,
+                            "seed_distance_pa": abs(float(dp.wing_loading_pa) - float(ws_seed_pa)),
                             "wing_loading_kg_per_m2": dp.wing_loading_kg_per_m2,
                             "p_w_takeoff_kw_per_kg": dp.p_w_takeoff_kw_per_kg,
                             "p_w_climb_kw_per_kg": dp.p_w_climb_kw_per_kg,
@@ -3408,6 +3521,7 @@ class CoupledConstraintSizingRunner:
                         "scan_stage": stage,
                         "scan_pass": int(pass_id),
                         "wing_loading_pa": dp.wing_loading_pa,
+                        "seed_distance_pa": abs(float(dp.wing_loading_pa) - float(ws_seed_pa)),
                         "wing_loading_kg_per_m2": dp.wing_loading_kg_per_m2,
                         "p_w_takeoff_kw_per_kg": dp.p_w_takeoff_kw_per_kg,
                         "p_w_climb_kw_per_kg": dp.p_w_climb_kw_per_kg,
@@ -3420,6 +3534,7 @@ class CoupledConstraintSizingRunner:
                         "error": "",
                     }
                 )
+                successful_samples.append((float(dp.wing_loading_pa), float(mass_i.mtom_kg)))
                 _log_converged_state(
                     state=f"{stage} pass {pass_id} | W/S={dp.wing_loading_pa:,.1f} Pa ("
                     f"{dp.wing_loading_kg_per_m2:.2f} kg/m^2)",
@@ -3428,47 +3543,113 @@ class CoupledConstraintSizingRunner:
                     cfg=cfg_i,
                 )
 
-                if best is None or mass_i.mtom_kg < best[0]:
-                    best = (float(mass_i.mtom_kg), cfg_i, phases_i, mass_i, dp)
+                cand: BestScanResult = (float(mass_i.mtom_kg), cfg_i, phases_i, mass_i, dp)
+                if best_global is None or _candidate_rank(cand) < _candidate_rank(best_global):
+                    best_global = cand
+                if _is_near_seed(float(dp.wing_loading_pa)):
+                    if best_near_seed is None or _candidate_rank(cand) < _candidate_rank(best_near_seed):
+                        best_near_seed = cand
 
-            # Keep next pass warm-start near the current best, not the last edge candidate.
-            if best is not None:
-                mtom_seed = float(best[0])
-                p_seed = float(best[2]["climb"].p_total_w)
+            # Keep next pass warm-start near the near-seed best whenever available.
+            warm_ref = best_near_seed if best_near_seed is not None else best_global
+            if warm_ref is not None:
+                mtom_seed = float(warm_ref[0])
+                p_seed = float(warm_ref[2]["climb"].p_total_w)
 
         try:
-            # First pass over a focused W/S region around ADRpy min combined P/W.
+            # Stage 0: evaluate ADRpy min_combined_pw seed explicitly first.
             _scan_ws_grid(
-                ws_grid=ws_grid_focus,
+                ws_grid=np.asarray([float(ws_seed_pa)], dtype=float),
                 pass_id=0,
-                stage="focus",
+                stage="seed",
                 ws_center_pa=ws_seed_pa,
             )
 
-            # Local refinement passes around current best W/S.
+            # Stage 1: global non-uniform seeds over the feasible W/S window.
+            ws_candidates_global = ws_seed_feasible if ws_seed_feasible.size > 0 else ws_grid_focus
+            global_budget = min(15, max(7, int(2.0 * math.sqrt(max(1, int(ws_candidates_global.size))) + 3)))
+            ws_grid_global = _build_nonuniform_seed_grid(
+                ws_candidates_pa=ws_candidates_global,
+                ws_center_pa=float(ws_seed_pa),
+                max_points=int(global_budget),
+            )
+            if ws_grid_global.size == 0:
+                ws_grid_global = np.asarray([float(ws_seed_pa)], dtype=float)
+            logger.info(
+                "Global seed scan: %d non-uniform points over %.1f..%.1f Pa (seed %.1f Pa).",
+                int(ws_grid_global.size),
+                float(np.min(ws_grid_global)),
+                float(np.max(ws_grid_global)),
+                float(ws_seed_pa),
+            )
+            _scan_ws_grid(
+                ws_grid=ws_grid_global,
+                pass_id=1,
+                stage="global",
+                ws_center_pa=ws_seed_pa,
+            )
+
+            # Stage 2: decision-driven local seeds around promising region.
+            ws_local_center_pa, ws_local_half_span_pa, ws_local_step_pa = _decide_local_seed_window()
+            ws_grid_local_dense = _build_refine_grid(
+                ws_center_pa=float(ws_local_center_pa),
+                ws_half_span_pa=float(ws_local_half_span_pa),
+                ws_step_pa=float(ws_local_step_pa),
+            )
+            local_budget = min(11, max(5, int(2.0 * math.sqrt(max(1, int(ws_grid_local_dense.size))) + 1)))
+            ws_grid_local = _build_nonuniform_seed_grid(
+                ws_candidates_pa=ws_grid_local_dense,
+                ws_center_pa=float(ws_local_center_pa),
+                max_points=int(local_budget),
+            )
+            if ws_grid_local.size == 0:
+                ws_grid_local = np.asarray([float(ws_local_center_pa)], dtype=float)
+            logger.info(
+                "Local seed decision: center %.1f Pa, half-span %.1f Pa, step %.3f Pa -> %d non-uniform points.",
+                float(ws_local_center_pa),
+                float(ws_local_half_span_pa),
+                float(ws_local_step_pa),
+                int(ws_grid_local.size),
+            )
+            _scan_ws_grid(
+                ws_grid=ws_grid_local,
+                pass_id=2,
+                stage="local",
+                ws_center_pa=float(ws_local_center_pa),
+            )
+
+            # Optional refinement passes (capped non-uniform sub-sampling for low compute effort).
             for p in range(refine_passes):
-                if best is None:
+                refine_ref = best_near_seed if best_near_seed is not None else best_global
+                if refine_ref is None:
                     break
-                best_dp = best[4]
+                best_dp = refine_ref[4]
                 ws_half_span_pa = ws_full_span_pa * refine_span_fraction * (0.5 ** p)
-                ws_step_pa = float(cs.ws_step_pa) * (0.5 ** (p + 1))
-                ws_grid_refine = _build_refine_grid(
+                ws_step_refine_pa = float(cs.ws_step_pa) * (0.5 ** (p + 1))
+                ws_grid_refine_dense = _build_refine_grid(
                     ws_center_pa=float(best_dp.wing_loading_pa),
                     ws_half_span_pa=float(ws_half_span_pa),
-                    ws_step_pa=float(ws_step_pa),
+                    ws_step_pa=float(ws_step_refine_pa),
+                )
+                refine_budget = min(9, max(5, int(2.0 * math.sqrt(max(1, int(ws_grid_refine_dense.size))))))
+                ws_grid_refine = _build_nonuniform_seed_grid(
+                    ws_candidates_pa=ws_grid_refine_dense,
+                    ws_center_pa=float(best_dp.wing_loading_pa),
+                    max_points=int(refine_budget),
                 )
                 logger.info(
-                    "Refine pass %d/%d: center %.1f Pa, half-span %.1f Pa, step %.3f Pa (%d points)",
+                    "Refine pass %d/%d: center %.1f Pa, half-span %.1f Pa, step %.3f Pa -> %d/%d points",
                     p + 1,
                     refine_passes,
                     float(best_dp.wing_loading_pa),
                     float(ws_half_span_pa),
-                    float(ws_step_pa),
+                    float(ws_step_refine_pa),
                     int(ws_grid_refine.size),
+                    int(ws_grid_refine_dense.size),
                 )
                 _scan_ws_grid(
                     ws_grid=ws_grid_refine,
-                    pass_id=p + 1,
+                    pass_id=p + 3,
                     stage="refine",
                     ws_center_pa=float(best_dp.wing_loading_pa),
                 )
@@ -3477,7 +3658,7 @@ class CoupledConstraintSizingRunner:
             if cs.scan_quiet:
                 logger.setLevel(old_level)
 
-        if best is None:
+        if best_global is None:
             if feasible_points == 0:
                 raise RuntimeError(
                     "No feasible W/S points for selection='min_mtom' "
@@ -3488,7 +3669,29 @@ class CoupledConstraintSizingRunner:
                 f"(all {scanned_points} scanned points failed in mass-closure)."
             )
 
-        best_mtom, best_cfg, best_phases, best_mass, best_dp = best
+        selected_best = best_near_seed if best_near_seed is not None else best_global
+        assert selected_best is not None
+        best_mtom, best_cfg, best_phases, best_mass, best_dp = selected_best
+        seed_delta_pa = abs(float(best_dp.wing_loading_pa) - float(ws_seed_pa))
+        if best_near_seed is None:
+            logger.warning(
+                "No converged near-seed candidate found within %.1f Pa of ADRpy min combined P/W seed "
+                "(W/S_seed=%.1f Pa). Falling back to global MTOM minimum at W/S=%.1f Pa (distance %.1f Pa).",
+                ws_seed_neighborhood_pa,
+                ws_seed_pa,
+                best_dp.wing_loading_pa,
+                seed_delta_pa,
+            )
+        elif best_global is not None and best_global is not best_near_seed:
+            global_dp = best_global[4]
+            logger.info(
+                "Using near-seed MTOM minimum at W/S=%.1f Pa (distance %.1f Pa from seed %.1f Pa). "
+                "Global MTOM minimum was at W/S=%.1f Pa.",
+                best_dp.wing_loading_pa,
+                seed_delta_pa,
+                ws_seed_pa,
+                global_dp.wing_loading_pa,
+            )
 
         logger.info(
             "ADRpy+HFCAD coupled sizing (min_mtom): W/S=%.1f Pa (%.2f kg/m^2), MTOM=%.1f kg, "
