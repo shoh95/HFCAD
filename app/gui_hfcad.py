@@ -54,8 +54,11 @@ try:
 
     PYQT_BACKEND = "PyQt5"
     HEADER_STRETCH = QHeaderView.Stretch
+    HEADER_FIXED = QHeaderView.Fixed
     SELECT_ROWS = QAbstractItemView.SelectRows
     EXTENDED_SELECTION = QAbstractItemView.ExtendedSelection
+    NO_SELECTION = QAbstractItemView.NoSelection
+    NO_EDIT_TRIGGERS = QAbstractItemView.NoEditTriggers
     SCROLLBAR_ALWAYS_ON = Qt.ScrollBarAlwaysOn
     SCROLLBAR_AS_NEEDED = Qt.ScrollBarAsNeeded
     ALIGN_CENTER = Qt.AlignCenter
@@ -100,8 +103,11 @@ except ImportError:
 
     PYQT_BACKEND = "PyQt6"
     HEADER_STRETCH = QHeaderView.ResizeMode.Stretch
+    HEADER_FIXED = QHeaderView.ResizeMode.Fixed
     SELECT_ROWS = QAbstractItemView.SelectionBehavior.SelectRows
     EXTENDED_SELECTION = QAbstractItemView.SelectionMode.ExtendedSelection
+    NO_SELECTION = QAbstractItemView.SelectionMode.NoSelection
+    NO_EDIT_TRIGGERS = QAbstractItemView.EditTrigger.NoEditTriggers
     SCROLLBAR_ALWAYS_ON = Qt.ScrollBarPolicy.ScrollBarAlwaysOn
     SCROLLBAR_AS_NEEDED = Qt.ScrollBarPolicy.ScrollBarAsNeeded
     ALIGN_CENTER = Qt.AlignmentFlag.AlignCenter
@@ -167,6 +173,7 @@ except Exception:  # pragma: no cover - optional runtime dependency
 
 try:
     from matplotlib.figure import Figure
+    from matplotlib.colors import is_color_like
 
     try:
         from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
@@ -177,6 +184,7 @@ try:
 except Exception:  # pragma: no cover - optional runtime dependency
     Figure = None  # type: ignore[assignment]
     FigureCanvas = None  # type: ignore[assignment]
+    is_color_like = None  # type: ignore[assignment]
     MATPLOTLIB_AVAILABLE = False
 
 
@@ -670,6 +678,51 @@ class HFCADGui(QMainWindow):
         frame_h = table.frameWidth() * 2
         return header_h + frame_h + row_h * max(min_rows, 1) + 4
 
+    def _hold_table_row_height(self) -> int:
+        if hasattr(self, "sweep_table") and self.sweep_table is not None:
+            try:
+                return max(int(self.sweep_table.verticalHeader().defaultSectionSize()), 24)
+            except Exception:
+                pass
+        return 24
+
+    def _set_hold_table_row_widgets(
+        self,
+        row_idx: int,
+        hold_param_combo: QComboBox,
+        hold_value_combo: QComboBox,
+        hold_tick_check: QCheckBox,
+    ) -> None:
+        row_label = QTableWidgetItem(str(row_idx + 1))
+        row_label.setFlags(row_label.flags() & ~ITEM_IS_EDITABLE)
+        self.graph_hold_table.setVerticalHeaderItem(row_idx, row_label)
+        self.graph_hold_table.setCellWidget(row_idx, 0, hold_param_combo)
+        self.graph_hold_table.setCellWidget(row_idx, 1, hold_value_combo)
+        self.graph_hold_table.setCellWidget(row_idx, 2, hold_tick_check)
+
+    def _resize_hold_table_rows(self) -> None:
+        if not hasattr(self, "graph_hold_table"):
+            return
+        row_h = self._hold_table_row_height()
+        self.graph_hold_table.verticalHeader().setDefaultSectionSize(row_h)
+        for row_idx in range(self.graph_hold_table.rowCount()):
+            self.graph_hold_table.setRowHeight(row_idx, row_h)
+        visible_rows = 3
+        table_h = self._table_min_height_for_rows(self.graph_hold_table, min_rows=visible_rows)
+        self.graph_hold_table.setMinimumHeight(table_h)
+        self.graph_hold_table.setMaximumHeight(table_h)
+
+    def _refresh_hold_table_row_labels(self) -> None:
+        if not hasattr(self, "graph_hold_table"):
+            return
+        for row_idx in range(self.graph_hold_table.rowCount()):
+            row_label = self.graph_hold_table.verticalHeaderItem(row_idx)
+            if row_label is None:
+                row_label = QTableWidgetItem(str(row_idx + 1))
+                self.graph_hold_table.setVerticalHeaderItem(row_idx, row_label)
+            row_label.setText(str(row_idx + 1))
+            row_label.setFlags(row_label.flags() & ~ITEM_IS_EDITABLE)
+
     def resizeEvent(self, event) -> None:  # type: ignore[override]
         super().resizeEvent(event)
         self._apply_mainpage_fonts()
@@ -843,10 +896,12 @@ class HFCADGui(QMainWindow):
         main_page = QWidget()
         generator_page = QWidget()
         output_page = QWidget()
+        graph_page = QWidget()
         logs_page = QWidget()
         tabs.addTab(main_page, "MainPage")
         tabs.addTab(generator_page, "Auto Input Generator")
         tabs.addTab(output_page, "Output")
+        tabs.addTab(graph_page, "Graph")
         tabs.addTab(logs_page, "Execution Logs")
 
         main_page_layout = QVBoxLayout(main_page)
@@ -1117,7 +1172,7 @@ class HFCADGui(QMainWindow):
         self.output_case_combo = NoWheelComboBox()
         self.output_file_combo = NoWheelComboBox()
         self.output_search_edit = QLineEdit()
-        self.output_search_edit.setPlaceholderText("Search cases/files/parameters...")
+        self.output_search_edit.setPlaceholderText("Search cases/files...")
         self.output_search_edit.setClearButtonEnabled(True)
         self.output_refresh_btn = QPushButton("Refresh")
         self.output_update_notebook_btn = QPushButton("Update Selected Notebook")
@@ -1126,14 +1181,61 @@ class HFCADGui(QMainWindow):
         self.output_file_path_label.setWordWrap(True)
         self.output_last_excel_label = QLabel("No Excel export yet.")
         self.output_last_excel_label.setWordWrap(True)
+        self.graph_search_edit = QLineEdit()
+        self.graph_search_edit.setPlaceholderText("Search graph parameters...")
+        self.graph_search_edit.setClearButtonEnabled(True)
         self.output_plot_x_combo = NoWheelComboBox()
         self.output_plot_y_combo = NoWheelComboBox()
+        self.output_plot_consistent_y_check = QCheckBox("Consistent Y Min/Max (across all hold values)")
+        self.output_plot_show_legend_check = QCheckBox("Show Legend")
+        self.output_plot_show_legend_check.setChecked(True)
+        self.output_plot_max_lines_spin = NoWheelSpinBox()
+        self.output_plot_max_lines_spin.setMinimum(0)
+        self.output_plot_max_lines_spin.setMaximum(100_000)
+        self.output_plot_max_lines_spin.setValue(0)
+        self.output_plot_max_lines_spin.setToolTip(
+            "0 means no cap. When Tick hold is enabled, this limits plotted lines."
+        )
+        self.output_plot_cap_strategy_combo = NoWheelComboBox()
+        self.output_plot_cap_strategy_combo.addItem("top by points", "top_points")
+        self.output_plot_cap_strategy_combo.addItem("first by hold value", "first_hold_value")
+        self.output_plot_cap_strategy_combo.setToolTip(
+            "How Max Lines selects kept lines when Tick-based multi-line plotting is used."
+        )
         self.output_hold_pairs: List[Tuple[NoWheelComboBox, NoWheelComboBox]] = []
+        self.output_hold_tick_checks: List[QCheckBox] = []
         for _ in range(OUTPUT_HOLD_SLOT_COUNT):
             self.output_hold_pairs.append((NoWheelComboBox(), NoWheelComboBox()))
+            tick_check = QCheckBox("Tick")
+            tick_check.setToolTip("If checked, this hold parameter is plotted as multiple lines by value.")
+            self.output_hold_tick_checks.append(tick_check)
         # Backward-compatible aliases for the first hold slot.
         self.output_hold_param_combo = self.output_hold_pairs[0][0]
         self.output_hold_value_combo = self.output_hold_pairs[0][1]
+        self.output_plot_x_min_edit = QLineEdit()
+        self.output_plot_x_max_edit = QLineEdit()
+        self.output_plot_x_tick_edit = QLineEdit()
+        self.output_plot_y_min_edit = QLineEdit()
+        self.output_plot_y_max_edit = QLineEdit()
+        self.output_plot_y_tick_edit = QLineEdit()
+        self.output_plot_marker_combo = NoWheelComboBox()
+        self.output_plot_marker_combo.addItems(["auto", "o", "s", "^", "d", "x", "+", "*", "none"])
+        self.output_plot_line_combo = NoWheelComboBox()
+        self.output_plot_line_combo.addItems(["auto", "-", "--", "-.", ":", "none"])
+        self.output_plot_color_edit = QLineEdit()
+        self.output_plot_alpha_edit = QLineEdit()
+        self.output_plot_marker_size_edit = QLineEdit()
+        self.output_plot_line_width_edit = QLineEdit()
+        self.output_plot_x_min_edit.setPlaceholderText("auto")
+        self.output_plot_x_max_edit.setPlaceholderText("auto")
+        self.output_plot_x_tick_edit.setPlaceholderText("auto")
+        self.output_plot_y_min_edit.setPlaceholderText("auto")
+        self.output_plot_y_max_edit.setPlaceholderText("auto")
+        self.output_plot_y_tick_edit.setPlaceholderText("auto")
+        self.output_plot_color_edit.setPlaceholderText("auto (e.g., C0, red, #1f77b4)")
+        self.output_plot_alpha_edit.setPlaceholderText("auto (0..1)")
+        self.output_plot_marker_size_edit.setPlaceholderText("auto")
+        self.output_plot_line_width_edit.setPlaceholderText("auto")
         self.output_plot_type_combo = NoWheelComboBox()
         self.output_plot_type_combo.addItems(
             ["function(mean)", "function(mean+minmax)", "scatter(raw)", "line(raw)"]
@@ -1155,18 +1257,6 @@ class HFCADGui(QMainWindow):
         output_group_layout.addWidget(self.output_file_path_label, 4, 1, 1, 4)
         output_group_layout.addWidget(QLabel("Exported Excel"), 5, 0)
         output_group_layout.addWidget(self.output_last_excel_label, 5, 1, 1, 4)
-        output_group_layout.addWidget(QLabel("Graph X"), 6, 0)
-        output_group_layout.addWidget(self.output_plot_x_combo, 6, 1)
-        output_group_layout.addWidget(QLabel("Graph Y"), 6, 2)
-        output_group_layout.addWidget(self.output_plot_y_combo, 6, 3)
-        output_group_layout.addWidget(self.output_plot_type_combo, 6, 4)
-        output_group_layout.addWidget(self.output_plot_btn, 6, 5)
-        for hold_idx, (hold_param_combo, hold_value_combo) in enumerate(self.output_hold_pairs):
-            row = 7 + hold_idx
-            output_group_layout.addWidget(QLabel(f"Hold Param {hold_idx + 1}"), row, 0)
-            output_group_layout.addWidget(hold_param_combo, row, 1, 1, 2)
-            output_group_layout.addWidget(QLabel(f"Hold Value {hold_idx + 1}"), row, 3)
-            output_group_layout.addWidget(hold_value_combo, row, 4, 1, 2)
         output_layout.addWidget(output_group)
 
         self.output_text = QPlainTextEdit()
@@ -1186,10 +1276,85 @@ class HFCADGui(QMainWindow):
         self.output_preview_stack.setCurrentIndex(OUTPUT_PREVIEW_TEXT)
         output_layout.addWidget(self.output_preview_stack, 2)
 
+        graph_layout = QVBoxLayout(graph_page)
+        graph_group = QGroupBox("Graph Options")
+        graph_group_layout = QGridLayout(graph_group)
+        graph_group_layout.addWidget(QLabel("Search"), 0, 0)
+        graph_group_layout.addWidget(self.graph_search_edit, 0, 1, 1, 3)
+        graph_group_layout.addWidget(QLabel("Graph X"), 1, 0)
+        graph_group_layout.addWidget(self.output_plot_x_combo, 1, 1)
+        graph_group_layout.addWidget(QLabel("Graph Y"), 1, 2)
+        graph_group_layout.addWidget(self.output_plot_y_combo, 1, 3)
+        graph_group_layout.addWidget(self.output_plot_type_combo, 1, 4)
+        graph_group_layout.addWidget(self.output_plot_btn, 1, 5)
+        graph_group_layout.addWidget(self.output_plot_show_legend_check, 2, 0, 1, 2)
+        graph_group_layout.addWidget(QLabel("Max Lines"), 2, 2)
+        graph_group_layout.addWidget(self.output_plot_max_lines_spin, 2, 3)
+        graph_group_layout.addWidget(QLabel("Cap Strategy"), 2, 4)
+        graph_group_layout.addWidget(self.output_plot_cap_strategy_combo, 2, 5)
+        graph_group_layout.addWidget(self.output_plot_consistent_y_check, 2, 6)
+        graph_group_layout.addWidget(QLabel("X Min"), 3, 0)
+        graph_group_layout.addWidget(self.output_plot_x_min_edit, 3, 1)
+        graph_group_layout.addWidget(QLabel("X Max"), 3, 2)
+        graph_group_layout.addWidget(self.output_plot_x_max_edit, 3, 3)
+        graph_group_layout.addWidget(QLabel("X dTick"), 3, 4)
+        graph_group_layout.addWidget(self.output_plot_x_tick_edit, 3, 5)
+        graph_group_layout.addWidget(QLabel("Y Min"), 4, 0)
+        graph_group_layout.addWidget(self.output_plot_y_min_edit, 4, 1)
+        graph_group_layout.addWidget(QLabel("Y Max"), 4, 2)
+        graph_group_layout.addWidget(self.output_plot_y_max_edit, 4, 3)
+        graph_group_layout.addWidget(QLabel("Y dTick"), 4, 4)
+        graph_group_layout.addWidget(self.output_plot_y_tick_edit, 4, 5)
+        graph_group_layout.addWidget(QLabel("Marker"), 5, 0)
+        graph_group_layout.addWidget(self.output_plot_marker_combo, 5, 1)
+        graph_group_layout.addWidget(QLabel("Line"), 5, 2)
+        graph_group_layout.addWidget(self.output_plot_line_combo, 5, 3)
+        graph_group_layout.addWidget(QLabel("Color"), 5, 4)
+        graph_group_layout.addWidget(self.output_plot_color_edit, 5, 5)
+        graph_group_layout.addWidget(QLabel("Alpha"), 6, 0)
+        graph_group_layout.addWidget(self.output_plot_alpha_edit, 6, 1)
+        graph_group_layout.addWidget(QLabel("Marker Size"), 6, 2)
+        graph_group_layout.addWidget(self.output_plot_marker_size_edit, 6, 3)
+        graph_group_layout.addWidget(QLabel("Line Width"), 6, 4)
+        graph_group_layout.addWidget(self.output_plot_line_width_edit, 6, 5)
+        graph_layout.addWidget(graph_group)
+
+        hold_group = QGroupBox("Hold Settings")
+        hold_layout = QVBoxLayout(hold_group)
+        self.graph_hold_table = QTableWidget(0, 3)
+        self.graph_hold_table.setHorizontalHeaderLabels(["Hold Param", "Hold Value", "Tick/Multi-line"])
+        self.graph_hold_table.verticalHeader().setVisible(True)
+        self.graph_hold_table.verticalHeader().setSectionResizeMode(HEADER_FIXED)
+        self.graph_hold_table.verticalHeader().setDefaultAlignment(ALIGN_CENTER)
+        self.graph_hold_table.horizontalHeader().setSectionResizeMode(0, HEADER_STRETCH)
+        self.graph_hold_table.horizontalHeader().setSectionResizeMode(1, HEADER_STRETCH)
+        self.graph_hold_table.horizontalHeader().setSectionResizeMode(2, HEADER_STRETCH)
+        self.graph_hold_table.setEditTriggers(NO_EDIT_TRIGGERS)
+        self.graph_hold_table.setSelectionMode(NO_SELECTION)
+        for hold_idx, (hold_param_combo, hold_value_combo) in enumerate(self.output_hold_pairs):
+            row = self.graph_hold_table.rowCount()
+            self.graph_hold_table.insertRow(row)
+            self._set_hold_table_row_widgets(
+                row,
+                hold_param_combo,
+                hold_value_combo,
+                self.output_hold_tick_checks[hold_idx],
+            )
+        self._resize_hold_table_rows()
+        hold_layout.addWidget(self.graph_hold_table)
+        hold_btn_layout = QHBoxLayout()
+        self.graph_add_hold_row_btn = QPushButton("Add Hold Row")
+        self.graph_remove_hold_row_btn = QPushButton("Remove Hold Row")
+        hold_btn_layout.addWidget(self.graph_add_hold_row_btn)
+        hold_btn_layout.addWidget(self.graph_remove_hold_row_btn)
+        hold_btn_layout.addStretch(1)
+        hold_layout.addLayout(hold_btn_layout)
+        graph_layout.addWidget(hold_group)
+
         if MATPLOTLIB_AVAILABLE and Figure is not None and FigureCanvas is not None:
             self.output_plot_figure = Figure(figsize=(6, 3), dpi=100)
             self.output_plot_canvas = FigureCanvas(self.output_plot_figure)
-            output_layout.addWidget(self.output_plot_canvas, 2)
+            graph_layout.addWidget(self.output_plot_canvas, 1)
         else:
             self.output_plot_figure = None
             self.output_plot_canvas = None
@@ -1197,7 +1362,7 @@ class HFCADGui(QMainWindow):
                 "Graph view unavailable: matplotlib backend could not be loaded."
             )
             self.output_plot_canvas_label.setWordWrap(True)
-            output_layout.addWidget(self.output_plot_canvas_label)
+            graph_layout.addWidget(self.output_plot_canvas_label, 1)
 
         logs_layout = QVBoxLayout(logs_page)
         status_row = QHBoxLayout()
@@ -1243,12 +1408,17 @@ class HFCADGui(QMainWindow):
         self.output_case_combo.currentIndexChanged.connect(self.on_output_case_changed)
         self.output_file_combo.currentIndexChanged.connect(self.on_output_file_changed)
         self.output_search_edit.textChanged.connect(self.on_output_search_changed)
+        self.graph_search_edit.textChanged.connect(self.on_graph_search_changed)
         self.output_refresh_btn.clicked.connect(self.on_refresh_outputs)
         self.output_update_notebook_btn.clicked.connect(self.on_update_selected_notebook)
         self.output_export_excel_btn.clicked.connect(self.on_export_all_case_data_to_excel)
         self.output_plot_btn.clicked.connect(self.on_draw_collected_plot)
+        self.graph_add_hold_row_btn.clicked.connect(self.on_add_hold_row)
+        self.graph_remove_hold_row_btn.clicked.connect(self.on_remove_hold_row)
         for hold_param_combo, _ in self.output_hold_pairs:
             hold_param_combo.currentIndexChanged.connect(self.on_output_hold_parameter_changed)
+        for hold_tick_check in self.output_hold_tick_checks:
+            hold_tick_check.stateChanged.connect(self.on_output_hold_tick_changed)
         self.sweep_param_combo.currentTextChanged.connect(self.on_sweep_parameter_changed)
         self.const_param_combo.currentTextChanged.connect(self.on_const_parameter_changed)
         self.const_value_combo.currentTextChanged.connect(self.const_value_edit.setText)
@@ -1543,11 +1713,49 @@ class HFCADGui(QMainWindow):
     def on_output_search_changed(self, _: str = "") -> None:
         self._refresh_output_views(
             refresh_cases=True,
-            refresh_plot_metrics=True,
         )
+
+    def on_graph_search_changed(self, _: str = "") -> None:
+        self._refresh_output_views(refresh_plot_metrics=True)
 
     def on_output_hold_parameter_changed(self, _: int = 0) -> None:
         self._refresh_output_views(refresh_hold_values=True)
+
+    def on_output_hold_tick_changed(self, _: int = 0) -> None:
+        self._refresh_output_views(refresh_hold_values=True)
+
+    def on_add_hold_row(self, _: bool = False) -> None:
+        hold_param_combo = NoWheelComboBox()
+        hold_value_combo = NoWheelComboBox()
+        hold_tick_check = QCheckBox("Tick")
+        hold_tick_check.setToolTip("If checked, this hold parameter is plotted as multiple lines by value.")
+
+        self.output_hold_pairs.append((hold_param_combo, hold_value_combo))
+        self.output_hold_tick_checks.append(hold_tick_check)
+        row = self.graph_hold_table.rowCount()
+        self.graph_hold_table.insertRow(row)
+        self._set_hold_table_row_widgets(row, hold_param_combo, hold_value_combo, hold_tick_check)
+        self._resize_hold_table_rows()
+
+        hold_param_combo.currentIndexChanged.connect(self.on_output_hold_parameter_changed)
+        hold_tick_check.stateChanged.connect(self.on_output_hold_tick_changed)
+
+        self._refresh_output_views(refresh_plot_metrics=True, refresh_hold_values=True)
+        self._log(f"[graph] added hold row #{row + 1}")
+
+    def on_remove_hold_row(self, _: bool = False) -> None:
+        if len(self.output_hold_pairs) <= 1:
+            self._show_warning("At least one hold row must remain.")
+            return
+
+        row = len(self.output_hold_pairs) - 1
+        self.output_hold_pairs.pop()
+        self.output_hold_tick_checks.pop()
+        self.graph_hold_table.removeRow(row)
+        self._refresh_hold_table_row_labels()
+        self._resize_hold_table_rows()
+        self._refresh_output_views(refresh_hold_values=True)
+        self._log(f"[graph] removed hold row #{row + 1}")
 
     def on_update_selected_notebook(self) -> None:
         notebook_path = self._selected_output_file_path()
@@ -1687,10 +1895,29 @@ class HFCADGui(QMainWindow):
             self._show_warning("Select X and Y columns for plotting.")
             return
 
+        axis_settings = self._read_plot_axis_settings()
+        if axis_settings is None:
+            return
+        style_settings = self._read_plot_style_settings()
+        if style_settings is None:
+            return
+        marker_style, line_style, color_value, alpha_value, marker_size, line_width = style_settings
+        show_legend = self.output_plot_show_legend_check.isChecked()
+        max_lines_cap = int(self.output_plot_max_lines_spin.value())
+        cap_strategy = str(self.output_plot_cap_strategy_combo.currentData() or "top_points")
+
         hold_filters: List[Tuple[str, float]] = []
+        hold_columns: List[str] = []
+        multiline_hold_columns: List[str] = []
         for hold_idx, (hold_param_combo, hold_value_combo) in enumerate(self.output_hold_pairs):
             hold_col = self._selected_metric_key(hold_param_combo)
             if not hold_col:
+                continue
+            if hold_col not in hold_columns:
+                hold_columns.append(hold_col)
+            if hold_idx < len(self.output_hold_tick_checks) and self.output_hold_tick_checks[hold_idx].isChecked():
+                if hold_col not in multiline_hold_columns:
+                    multiline_hold_columns.append(hold_col)
                 continue
             hold_value_data = hold_value_combo.currentData()
             if not isinstance(hold_value_data, (int, float)):
@@ -1698,8 +1925,261 @@ class HFCADGui(QMainWindow):
                 return
             hold_filters.append((hold_col, float(hold_value_data)))
 
-        points = []
+        conflicting_cols = set(multiline_hold_columns) & {col for col, _ in hold_filters}
+        if conflicting_cols:
+            col_list = ", ".join(sorted(conflicting_cols))
+            self._show_warning(
+                f"Hold parameter(s) {col_list} are set both as fixed hold and Tick.\n"
+                "Use either fixed hold value or Tick for each hold parameter."
+            )
+            return
+
+        filtered_rows = self._collect_plot_rows(
+            hold_filters=hold_filters,
+            required_hold_columns=hold_columns,
+        )
+        grouped_points: Dict[Tuple[float, ...], List[Tuple[float, float, str]]] = {}
+        for row in filtered_rows:
+            x_val = row.get(x_col)
+            y_val = row.get(y_col)
+            if not isinstance(x_val, (int, float)) or not isinstance(y_val, (int, float)):
+                continue
+            group_key = (
+                tuple(float(row[col]) for col in multiline_hold_columns)
+                if multiline_hold_columns
+                else ()
+            )
+            grouped_points.setdefault(group_key, []).append(
+                (float(x_val), float(y_val), str(row.get("case_name", "")))
+            )
+
+        if not grouped_points:
+            self._show_warning("No numeric data points found for the selected x/y columns.")
+            return
+        has_multiline = bool(multiline_hold_columns)
+        all_series_items = sorted(grouped_points.items(), key=lambda item: item[0])
+        total_point_count_available = sum(len(series_points) for _, series_points in all_series_items)
+        series_items = all_series_items
+        capped_series_count = 0
+        if has_multiline and max_lines_cap > 0 and len(series_items) > max_lines_cap:
+            if cap_strategy == "first_hold_value":
+                series_items = series_items[:max_lines_cap]
+            else:
+                ranked_items = sorted(series_items, key=lambda item: (-len(item[1]), item[0]))
+                series_items = sorted(ranked_items[:max_lines_cap], key=lambda item: item[0])
+            capped_series_count = len(all_series_items) - len(series_items)
+        total_point_count = sum(len(series_points) for _, series_points in series_items)
+
+        plot_mode = self.output_plot_type_combo.currentText().strip().lower()
+
+        self.output_plot_figure.clear()
+        ax = self.output_plot_figure.add_subplot(111)
+        plotted_series_count = 0
+        plotted_point_count = 0
+        first_unique_x_count = 0
+        if plot_mode.startswith("function"):
+            for series_key, series_points in series_items:
+                if not series_points:
+                    continue
+                series_points.sort(key=lambda p: p[0])
+                grouped: Dict[float, List[float]] = {}
+                for x_val, y_val, _ in series_points:
+                    grouped.setdefault(x_val, []).append(y_val)
+                if len(grouped) < 2:
+                    continue
+
+                unique_x = sorted(grouped.keys())
+                y_mean = [sum(grouped[x]) / len(grouped[x]) for x in unique_x]
+                series_label = (
+                    self._format_multiline_hold_label(multiline_hold_columns, series_key)
+                    if has_multiline
+                    else "mean"
+                )
+                mean_marker = self._marker_from_style(marker_style, "o")
+                mean_line = self._line_from_style(line_style, "-")
+                mean_kwargs: Dict[str, object] = {}
+                mean_kwargs["marker"] = mean_marker if mean_marker is not None else "None"
+                mean_kwargs["linestyle"] = mean_line if mean_line is not None else "None"
+                mean_kwargs["label"] = series_label
+                if color_value is not None:
+                    mean_kwargs["color"] = color_value
+                if alpha_value is not None:
+                    mean_kwargs["alpha"] = alpha_value
+                if marker_size is not None:
+                    mean_kwargs["markersize"] = marker_size
+                if line_width is not None:
+                    mean_kwargs["linewidth"] = line_width
+                ax.plot(unique_x, y_mean, **mean_kwargs)
+
+                if "minmax" in plot_mode:
+                    y_min = [min(grouped[x]) for x in unique_x]
+                    y_max = [max(grouped[x]) for x in unique_x]
+                    fill_kwargs: Dict[str, object] = {"alpha": 0.20}
+                    fill_kwargs["label"] = (
+                        f"{series_label} min-max" if has_multiline else "min-max"
+                    )
+                    if color_value is not None:
+                        fill_kwargs["color"] = color_value
+                    if alpha_value is not None:
+                        fill_kwargs["alpha"] = alpha_value
+                    ax.fill_between(unique_x, y_min, y_max, **fill_kwargs)
+
+                if not has_multiline and len(unique_x) <= 20:
+                    for x_val, y_val in zip(unique_x, y_mean):
+                        ax.annotate(f"{y_val:.3g}", (x_val, y_val), fontsize=7, alpha=0.85)
+                plotted_series_count += 1
+                plotted_point_count += len(series_points)
+                if first_unique_x_count <= 0:
+                    first_unique_x_count = len(unique_x)
+
+            if plotted_series_count <= 0:
+                self._show_warning(
+                    f"No plottable function lines for '{x_col}'.\n"
+                    "Each selected line needs at least two unique X values."
+                )
+                return
+            if has_multiline:
+                ax.set_title(
+                    f"{y_col} = f({x_col}) [{plotted_series_count} lines, {plotted_point_count} points]"
+                )
+            else:
+                ax.set_title(
+                    f"{y_col} = f({x_col}) [{first_unique_x_count} unique X, {plotted_point_count} cases]"
+                )
+            if show_legend and (has_multiline or "minmax" in plot_mode):
+                ax.legend(loc="best")
+        else:
+            for series_key, series_points in series_items:
+                if not series_points:
+                    continue
+                series_points.sort(key=lambda p: p[0])
+                x_values = [p[0] for p in series_points]
+                y_values = [p[1] for p in series_points]
+                labels = [p[2] for p in series_points]
+                series_label = (
+                    self._format_multiline_hold_label(multiline_hold_columns, series_key)
+                    if has_multiline
+                    else ""
+                )
+                if plot_mode == "line(raw)":
+                    raw_marker = self._marker_from_style(marker_style, "o")
+                    raw_line = self._line_from_style(line_style, "-")
+                    raw_line_kwargs: Dict[str, object] = {}
+                    raw_line_kwargs["marker"] = raw_marker if raw_marker is not None else "None"
+                    raw_line_kwargs["linestyle"] = raw_line if raw_line is not None else "None"
+                    if series_label:
+                        raw_line_kwargs["label"] = series_label
+                    if color_value is not None:
+                        raw_line_kwargs["color"] = color_value
+                    if alpha_value is not None:
+                        raw_line_kwargs["alpha"] = alpha_value
+                    if marker_size is not None:
+                        raw_line_kwargs["markersize"] = marker_size
+                    if line_width is not None:
+                        raw_line_kwargs["linewidth"] = line_width
+                    ax.plot(x_values, y_values, **raw_line_kwargs)
+                else:
+                    raw_marker = self._marker_from_style(marker_style, "o")
+                    scatter_kwargs: Dict[str, object] = {"marker": raw_marker or "o"}
+                    if series_label:
+                        scatter_kwargs["label"] = series_label
+                    if color_value is not None:
+                        scatter_kwargs["color"] = color_value
+                    if alpha_value is not None:
+                        scatter_kwargs["alpha"] = alpha_value
+                    if marker_size is not None:
+                        scatter_kwargs["s"] = marker_size * marker_size
+                    if line_width is not None:
+                        scatter_kwargs["linewidths"] = line_width
+                    ax.scatter(x_values, y_values, **scatter_kwargs)
+
+                if not has_multiline and len(series_points) <= 20:
+                    for x_val, y_val, label in zip(x_values, y_values, labels):
+                        ax.annotate(label, (x_val, y_val), fontsize=7, alpha=0.85)
+                plotted_series_count += 1
+                plotted_point_count += len(series_points)
+
+            if plotted_series_count <= 0:
+                self._show_warning("No numeric data points found for the selected x/y columns.")
+                return
+            if has_multiline:
+                ax.set_title(
+                    f"{y_col} vs {x_col} [{plotted_series_count} lines, {plotted_point_count} points, raw]"
+                )
+                if show_legend:
+                    ax.legend(loc="best")
+            else:
+                ax.set_title(f"{y_col} vs {x_col} [{plotted_point_count} cases, raw]")
+
+        ax.set_xlabel(x_col)
+        ax.set_ylabel(y_col)
+        if not self._apply_plot_axis_controls(
+            ax,
+            x_col=x_col,
+            y_col=y_col,
+            hold_columns=hold_columns,
+            axis_settings=axis_settings,
+        ):
+            return
+        ax.grid(True, alpha=0.25)
+        self.output_plot_figure.tight_layout()
+        self.output_plot_canvas.draw_idle()
+        hold_text = ""
+        if hold_filters:
+            hold_parts = [f"{col}={fmt_float_for_ini(value)}" for col, value in hold_filters]
+            hold_text = f", holds={'; '.join(hold_parts)}"
+        tick_text = ""
+        if multiline_hold_columns:
+            tick_text = f", tick={'; '.join(multiline_hold_columns)}"
+        axis_mode_text = ", consistent_y=on" if self.output_plot_consistent_y_check.isChecked() else ""
+        style_text = (
+            f", marker={marker_style}, line={line_style}"
+            f", color={color_value if color_value is not None else 'auto'}"
+            f", alpha={fmt_float_for_ini(alpha_value) if alpha_value is not None else 'auto'}"
+            f", marker_size={fmt_float_for_ini(marker_size) if marker_size is not None else 'auto'}"
+            f", line_width={fmt_float_for_ini(line_width) if line_width is not None else 'auto'}"
+        )
+        legend_text = f", legend={'on' if show_legend else 'off'}"
+        cap_text = f", max_lines={max_lines_cap if max_lines_cap > 0 else 'none'}"
+        cap_strategy_text = f", cap_strategy={cap_strategy}"
+        dropped_text = f", capped_out={capped_series_count}" if capped_series_count > 0 else ""
+        self._log(
+            f"[output-graph] plotted {plotted_point_count} points: y={y_col}, x={x_col}, "
+            f"mode={plot_mode}{hold_text}{tick_text}{axis_mode_text}{style_text}"
+            f"{legend_text}{cap_text}{cap_strategy_text}{dropped_text}, "
+            f"series={plotted_series_count}, total_points={total_point_count}, "
+            f"available_points={total_point_count_available}"
+        )
+
+    @staticmethod
+    def _format_multiline_hold_label(hold_columns: Sequence[str], hold_values: Sequence[float]) -> str:
+        if not hold_columns or not hold_values:
+            return "line"
+        parts = []
+        for hold_col, hold_value in zip(hold_columns, hold_values):
+            parts.append(f"{hold_col}={fmt_float_for_ini(float(hold_value))}")
+        return "; ".join(parts) if parts else "line"
+
+    def _collect_plot_rows(
+        self,
+        *,
+        hold_filters: Sequence[Tuple[str, float]] = (),
+        required_hold_columns: Sequence[str] = (),
+    ) -> List[Dict[str, float | int | str]]:
+        required_cols = set(required_hold_columns)
+        required_cols.update(col for col, _ in hold_filters)
+
+        rows: List[Dict[str, float | int | str]] = []
         for row in self._collected_case_rows:
+            row_valid = True
+            for hold_col in required_cols:
+                hold_row_value = row.get(hold_col)
+                if not isinstance(hold_row_value, (int, float)):
+                    row_valid = False
+                    break
+            if not row_valid:
+                continue
+
             hold_matched = True
             for hold_col, hold_value in hold_filters:
                 hold_row_value = row.get(hold_col)
@@ -1712,73 +2192,223 @@ class HFCADGui(QMainWindow):
                     break
             if not hold_matched:
                 continue
+            rows.append(row)
+        return rows
 
+    def _collect_plot_points(
+        self,
+        x_col: str,
+        y_col: str,
+        *,
+        hold_filters: Sequence[Tuple[str, float]] = (),
+        required_hold_columns: Sequence[str] = (),
+    ) -> List[Tuple[float, float, str]]:
+        points: List[Tuple[float, float, str]] = []
+        rows = self._collect_plot_rows(
+            hold_filters=hold_filters,
+            required_hold_columns=required_hold_columns,
+        )
+        for row in rows:
             x_val = row.get(x_col)
             y_val = row.get(y_col)
             if isinstance(x_val, (int, float)) and isinstance(y_val, (int, float)):
                 points.append((float(x_val), float(y_val), str(row.get("case_name", ""))))
+        return points
 
-        if not points:
-            self._show_warning("No numeric data points found for the selected x/y columns.")
-            return
+    def _read_plot_axis_settings(
+        self,
+    ) -> Optional[Tuple[Optional[float], Optional[float], Optional[float], Optional[float], Optional[float], Optional[float]]]:
+        try:
+            x_min = self._parse_optional_axis_float(self.output_plot_x_min_edit.text(), "X min")
+            x_max = self._parse_optional_axis_float(self.output_plot_x_max_edit.text(), "X max")
+            x_tick = self._parse_optional_axis_float(self.output_plot_x_tick_edit.text(), "X dTick")
+            y_min = self._parse_optional_axis_float(self.output_plot_y_min_edit.text(), "Y min")
+            y_max = self._parse_optional_axis_float(self.output_plot_y_max_edit.text(), "Y max")
+            y_tick = self._parse_optional_axis_float(self.output_plot_y_tick_edit.text(), "Y dTick")
+        except ValueError as exc:
+            self._show_warning(str(exc))
+            return None
 
-        plot_mode = self.output_plot_type_combo.currentText().strip().lower()
-        points.sort(key=lambda p: p[0])
-        x_values = [p[0] for p in points]
-        y_values = [p[1] for p in points]
-        labels = [p[2] for p in points]
+        if x_tick is not None and x_tick <= 0:
+            self._show_warning("X dTick must be greater than 0.")
+            return None
+        if y_tick is not None and y_tick <= 0:
+            self._show_warning("Y dTick must be greater than 0.")
+            return None
+        if x_min is not None and x_max is not None and x_min > x_max:
+            self._show_warning("X min must be less than or equal to X max.")
+            return None
+        if y_min is not None and y_max is not None and y_min > y_max:
+            self._show_warning("Y min must be less than or equal to Y max.")
+            return None
+        return x_min, x_max, x_tick, y_min, y_max, y_tick
 
-        self.output_plot_figure.clear()
-        ax = self.output_plot_figure.add_subplot(111)
-        if plot_mode.startswith("function"):
-            grouped: Dict[float, List[float]] = {}
-            for x_val, y_val, _ in points:
-                grouped.setdefault(x_val, []).append(y_val)
+    @classmethod
+    def _parse_optional_axis_float(cls, raw_text: str, field_name: str) -> Optional[float]:
+        text = raw_text.strip()
+        if not text:
+            return None
+        parsed = cls._parse_value(text)
+        if not isinstance(parsed, (int, float)):
+            raise ValueError(f"{field_name} must be a numeric value.")
+        value = float(parsed)
+        if not math.isfinite(value):
+            raise ValueError(f"{field_name} must be finite.")
+        return value
 
-            if len(grouped) < 2:
-                self._show_warning(
-                    f"Selected X parameter '{x_col}' has fewer than two unique values.\n"
-                    "Choose another X parameter for function analysis."
-                )
-                return
-
-            unique_x = sorted(grouped.keys())
-            y_mean = [sum(grouped[x]) / len(grouped[x]) for x in unique_x]
-            ax.plot(unique_x, y_mean, marker="o", linestyle="-", label="mean")
-
-            if "minmax" in plot_mode:
-                y_min = [min(grouped[x]) for x in unique_x]
-                y_max = [max(grouped[x]) for x in unique_x]
-                ax.fill_between(unique_x, y_min, y_max, alpha=0.20, label="min-max")
-
-            ax.set_title(
-                f"{y_col} = f({x_col}) [{len(unique_x)} unique X, {len(points)} cases]"
+    def _read_plot_style_settings(
+        self,
+    ) -> Optional[Tuple[str, str, Optional[str], Optional[float], Optional[float], Optional[float]]]:
+        marker_style = self.output_plot_marker_combo.currentText().strip().lower()
+        line_style = self.output_plot_line_combo.currentText().strip().lower()
+        color_raw = self.output_plot_color_edit.text().strip()
+        color_value: Optional[str] = None
+        if color_raw and color_raw.lower() != "auto":
+            color_value = color_raw
+            if callable(is_color_like) and not is_color_like(color_value):
+                self._show_warning("Color must be a valid matplotlib color (e.g., C0, red, #1f77b4).")
+                return None
+        try:
+            alpha_value = self._parse_optional_axis_float(
+                self.output_plot_alpha_edit.text(),
+                "Alpha",
             )
-            if len(unique_x) <= 20:
-                for x_val, y_val in zip(unique_x, y_mean):
-                    ax.annotate(f"{y_val:.3g}", (x_val, y_val), fontsize=7, alpha=0.85)
-            if "minmax" in plot_mode:
-                ax.legend(loc="best")
-        else:
-            if plot_mode == "line(raw)":
-                ax.plot(x_values, y_values, marker="o", linestyle="-")
-            else:
-                ax.scatter(x_values, y_values)
-            ax.set_title(f"{y_col} vs {x_col} [{len(points)} cases, raw]")
-            if len(points) <= 20:
-                for x_val, y_val, label in zip(x_values, y_values, labels):
-                    ax.annotate(label, (x_val, y_val), fontsize=7, alpha=0.85)
+            marker_size = self._parse_optional_axis_float(
+                self.output_plot_marker_size_edit.text(),
+                "Marker size",
+            )
+            line_width = self._parse_optional_axis_float(
+                self.output_plot_line_width_edit.text(),
+                "Line width",
+            )
+        except ValueError as exc:
+            self._show_warning(str(exc))
+            return None
 
-        ax.set_xlabel(x_col)
-        ax.set_ylabel(y_col)
-        ax.grid(True, alpha=0.25)
-        self.output_plot_figure.tight_layout()
-        self.output_plot_canvas.draw_idle()
-        hold_text = ""
-        if hold_filters:
-            hold_parts = [f"{col}={fmt_float_for_ini(value)}" for col, value in hold_filters]
-            hold_text = f", holds={'; '.join(hold_parts)}"
-        self._log(f"[output-graph] plotted {len(points)} points: y={y_col}, x={x_col}, mode={plot_mode}{hold_text}")
+        if alpha_value is not None and (alpha_value < 0 or alpha_value > 1):
+            self._show_warning("Alpha must be between 0 and 1.")
+            return None
+        if marker_size is not None and marker_size <= 0:
+            self._show_warning("Marker size must be greater than 0.")
+            return None
+        if line_width is not None and line_width <= 0:
+            self._show_warning("Line width must be greater than 0.")
+            return None
+        return marker_style, line_style, color_value, alpha_value, marker_size, line_width
+
+    @staticmethod
+    def _marker_from_style(style: str, default_marker: str) -> Optional[str]:
+        if style == "auto":
+            return default_marker
+        if style == "none":
+            return None
+        return style
+
+    @staticmethod
+    def _line_from_style(style: str, default_line: str) -> Optional[str]:
+        if style == "auto":
+            return default_line
+        if style == "none":
+            return None
+        return style
+
+    def _apply_plot_axis_controls(
+        self,
+        ax,
+        *,
+        x_col: str,
+        y_col: str,
+        hold_columns: Sequence[str],
+        axis_settings: Tuple[Optional[float], Optional[float], Optional[float], Optional[float], Optional[float], Optional[float]],
+    ) -> bool:
+        x_min_user, x_max_user, x_tick, y_min_user, y_max_user, y_tick = axis_settings
+
+        x_min, x_max = ax.get_xlim()
+        if x_min_user is not None:
+            x_min = x_min_user
+        if x_max_user is not None:
+            x_max = x_max_user
+        if x_min > x_max:
+            self._show_warning("Invalid X axis range: min is larger than max.")
+            return False
+        x_min, x_max = self._expand_degenerate_axis_limits(x_min, x_max)
+        if x_min_user is not None or x_max_user is not None:
+            ax.set_xlim(x_min, x_max)
+
+        y_min, y_max = ax.get_ylim()
+        if self.output_plot_consistent_y_check.isChecked():
+            consistent_points = self._collect_plot_points(
+                x_col,
+                y_col,
+                required_hold_columns=hold_columns,
+            )
+            if consistent_points:
+                y_values = [p[1] for p in consistent_points]
+                y_min = min(y_values)
+                y_max = max(y_values)
+
+        if y_min_user is not None:
+            y_min = y_min_user
+        if y_max_user is not None:
+            y_max = y_max_user
+        if y_min > y_max:
+            self._show_warning("Invalid Y axis range: min is larger than max.")
+            return False
+        y_min, y_max = self._expand_degenerate_axis_limits(y_min, y_max)
+        if self.output_plot_consistent_y_check.isChecked() or y_min_user is not None or y_max_user is not None:
+            ax.set_ylim(y_min, y_max)
+
+        try:
+            if x_tick is not None:
+                x_tick_values = self._build_axis_ticks(ax.get_xlim()[0], ax.get_xlim()[1], x_tick)
+                ax.set_xticks(x_tick_values)
+            if y_tick is not None:
+                y_tick_values = self._build_axis_ticks(ax.get_ylim()[0], ax.get_ylim()[1], y_tick)
+                ax.set_yticks(y_tick_values)
+        except ValueError as exc:
+            self._show_warning(str(exc))
+            return False
+
+        return True
+
+    @staticmethod
+    def _expand_degenerate_axis_limits(min_value: float, max_value: float) -> Tuple[float, float]:
+        if min_value < max_value:
+            return min_value, max_value
+        # Avoid matplotlib warnings/errors when limits collapse to a single value.
+        reference = max(1.0, abs(min_value), abs(max_value))
+        pad = max(1e-9, reference * 0.02)
+        return min_value - pad, max_value + pad
+
+    @staticmethod
+    def _build_axis_ticks(min_value: float, max_value: float, delta: float) -> List[float]:
+        if delta <= 0 or not math.isfinite(delta):
+            raise ValueError("Axis dTick must be a finite value greater than 0.")
+        if not math.isfinite(min_value) or not math.isfinite(max_value):
+            raise ValueError("Axis range is not finite; cannot apply dTick.")
+        if min_value > max_value:
+            raise ValueError("Axis range is invalid; min is larger than max.")
+        if min_value == max_value:
+            return [min_value]
+
+        span = max_value - min_value
+        max_tick_count = 2000
+        if span / delta > max_tick_count:
+            raise ValueError(
+                f"dTick={fmt_float_for_ini(delta)} creates too many ticks "
+                f"for range [{fmt_float_for_ini(min_value)}, {fmt_float_for_ini(max_value)}]."
+            )
+
+        tick_count = int(math.floor(span / delta + 1e-12))
+        ticks = [min_value + i * delta for i in range(tick_count + 1)]
+        if not ticks:
+            return [min_value, max_value]
+        eps = max(1e-12, abs(delta) * 1e-9)
+        if max_value - ticks[-1] > eps:
+            ticks.append(max_value)
+        else:
+            ticks[-1] = max_value
+        return ticks
 
     def _selected_output_file_path(self) -> Optional[Path]:
         file_data = self.output_file_combo.currentData()
@@ -1977,7 +2607,7 @@ class HFCADGui(QMainWindow):
 
     def _refresh_plot_metric_combos(self, *, refresh_hold_values: bool = True) -> None:
         ordered_metrics = self._ordered_plot_metrics()
-        query = self._output_search_query()
+        query = self._graph_search_query()
         current_x = self._selected_metric_key(self.output_plot_x_combo)
         current_y = self._selected_metric_key(self.output_plot_y_combo)
         current_holds = [self._selected_metric_key(param_combo) for param_combo, _ in self.output_hold_pairs]
@@ -2060,6 +2690,9 @@ class HFCADGui(QMainWindow):
     def _output_search_query(self) -> str:
         return self.output_search_edit.text().strip().lower()
 
+    def _graph_search_query(self) -> str:
+        return self.graph_search_edit.text().strip().lower()
+
     def _resolve_sweep_metric_column(self, sweep: SweepParameter, metric_set: set[str]) -> Optional[str]:
         try:
             section, key = split_parameter(sweep.name)
@@ -2097,18 +2730,25 @@ class HFCADGui(QMainWindow):
         return str(data).strip()
 
     def _refresh_hold_value_combo(self) -> None:
-        for hold_param_combo, hold_value_combo in self.output_hold_pairs:
+        for hold_idx, (hold_param_combo, hold_value_combo) in enumerate(self.output_hold_pairs):
             hold_col = self._selected_metric_key(hold_param_combo)
             prev_value = hold_value_combo.currentData()
+            hold_tick_check = self.output_hold_tick_checks[hold_idx]
+            tick_enabled = hold_tick_check.isChecked()
 
             hold_value_combo.blockSignals(True)
             hold_value_combo.clear()
 
             if not hold_col:
+                hold_tick_check.blockSignals(True)
+                hold_tick_check.setChecked(False)
+                hold_tick_check.setEnabled(False)
+                hold_tick_check.blockSignals(False)
                 hold_value_combo.setEnabled(False)
                 hold_value_combo.addItem("(All)", None)
                 hold_value_combo.blockSignals(False)
                 continue
+            hold_tick_check.setEnabled(True)
 
             unique_values = sorted(
                 {
@@ -2118,12 +2758,15 @@ class HFCADGui(QMainWindow):
                 }
             )
             if not unique_values:
+                hold_tick_check.blockSignals(True)
+                hold_tick_check.setChecked(False)
+                hold_tick_check.setEnabled(False)
+                hold_tick_check.blockSignals(False)
                 hold_value_combo.setEnabled(False)
                 hold_value_combo.addItem("(No Values)", None)
                 hold_value_combo.blockSignals(False)
                 continue
 
-            hold_value_combo.setEnabled(True)
             for value in unique_values:
                 hold_value_combo.addItem(fmt_float_for_ini(value), value)
 
@@ -2134,6 +2777,11 @@ class HFCADGui(QMainWindow):
                         target_idx = i
                         break
             hold_value_combo.setCurrentIndex(target_idx if target_idx >= 0 else 0)
+            hold_value_combo.setEnabled(not tick_enabled)
+            if tick_enabled:
+                hold_value_combo.setToolTip("Disabled because Tick is enabled for multi-line plotting.")
+            else:
+                hold_value_combo.setToolTip("")
             hold_value_combo.blockSignals(False)
 
     def _collect_all_case_data_rows(self, out_dir: Path) -> Tuple[List[Dict[str, float | int | str]], List[str]]:

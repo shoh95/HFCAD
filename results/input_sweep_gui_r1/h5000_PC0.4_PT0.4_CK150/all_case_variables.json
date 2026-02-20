@@ -1,0 +1,685 @@
+{
+  "meta": {
+    "generated_at": "2026-02-21 06:20:31",
+    "input_path": "/home/shoh95/Programming/HFCAD/app/input_sweep_gui_r1/h5000_PC0.4_PT0.4_CK150.ini",
+    "output_path": "/home/shoh95/Programming/HFCAD/results/input_sweep_gui_r1/h5000_PC0.4_PT0.4_CK150",
+    "execution_time_s": 5.4821181439983775
+  },
+  "config_used": {
+    "mission": {
+      "times_min": [
+        0,
+        5,
+        15,
+        16,
+        23,
+        25,
+        70,
+        71,
+        100,
+        110,
+        112,
+        116,
+        118,
+        135,
+        135,
+        135,
+        140,
+        150,
+        160,
+        160
+      ]
+    },
+    "flight": {
+      "h_cr_m": 5000.0,
+      "mach_cr": 0.24073552456308092,
+      "loiter_speed_ratio_to_cruise": 0.83,
+      "h_takeoff_m": 0.0,
+      "mach_takeoff": 0.16
+    },
+    "fuel_cell_arch": {
+      "n_stacks_series": 1,
+      "n_stacks_parallel": 2,
+      "volt_req_v": 700.0
+    },
+    "fuel_cell_op": {
+      "oversizing": 0.0,
+      "beta": "True"
+    },
+    "hybrid": {
+      "psi_takeoff": 0.4,
+      "psi_climb": 0.4,
+      "psi_cruise_charger": 0.0
+    },
+    "eff": {
+      "eta_converter": 0.97,
+      "eta_pdu": 0.98,
+      "eta_inverter": 0.97,
+      "eta_motor": 0.95,
+      "eta_prop": 0.83,
+      "eta_em": 0.9215
+    },
+    "densities": {
+      "rhofc_w_per_kg": 3000.0,
+      "rhopmad_w_per_kg": 15000.0,
+      "rhoem_w_per_kg": 7000.0
+    },
+    "p_w": {
+      "p_w_climb_kw_per_kg": 0.19640312025483414,
+      "p_w_cruise_kw_per_kg": 0.06048216656350931,
+      "p_w_takeoff_kw_per_kg": 0.1924999238149432
+    },
+    "cooling": {
+      "dT_K": 60.0
+    },
+    "hydrogen": {
+      "rho_h2_kg_m3": 70.0,
+      "eta_storage": 0.4,
+      "eta_vol": 0.5,
+      "coversize": 1.5,
+      "range_total_km": 1000.0,
+      "h_to_m": 0.0,
+      "vv_mps": 6.603999999999999
+    },
+    "wing": {
+      "wing_loading_kg_per_m2": 235.80937425114593,
+      "aspect_ratio": 9.0,
+      "t_c": 0.15,
+      "n_ult": 4.5,
+      "lc4_deg": 0.0,
+      "taper": 0.4
+    },
+    "fuselage": {
+      "dfus_m": 1.65,
+      "finerat_fus_nose": 0.6,
+      "finerat_fus_tail": 0.8,
+      "fnose": 1.0,
+      "ftail": 2.0,
+      "lseat_m": 1.02,
+      "npass": 9,
+      "nseat_abreast": 3,
+      "ldoor_m": 1.0,
+      "lht_ft": 27.0,
+      "legacy_kc_overwrite_bug": false
+    },
+    "tail": {
+      "enable": true,
+      "ll_ht": 0.49380955,
+      "ll_vt": 0.48267689,
+      "c_ht": 0.6,
+      "c_vt": 0.07,
+      "l_wing_m": 8.7,
+      "main_wing_location": false,
+      "main_wing_loacation_m": 8.7,
+      "a_ht": 5.0,
+      "lamda_ht": 0.4,
+      "a_vt": 1.9,
+      "lamda_vt": 0.4,
+      "x_fuse_mm": 0.0,
+      "ac": 0.25,
+      "wingpos": "rand",
+      "theta_le_deg": 5.0,
+      "theta_le_ht_deg": 10.0,
+      "theta_le_vt_deg": 25.0,
+      "delta_hs_cap_length_mm": 600.0,
+      "delta_vs_cap_length_mm": 300.0,
+      "max_iter": 200,
+      "tol_m": 1e-05
+    },
+    "weights": {
+      "oemmisc_base_kg": 0.0,
+      "payload_kg": 1000.0,
+      "rhobatt_kwh_per_kg": 0.3,
+      "battery_sizing_mode": "TO_Climb_only",
+      "battery_use_time_hr": 0.234,
+      "battery_reserve_fraction": 0.25
+    },
+    "solver": {
+      "power_tol_w": 1000.0,
+      "mtom_tol_kg": 5.0,
+      "max_outer_iter": 200,
+      "max_inner_iter": 200,
+      "compressor_mass_mode": "surrogate",
+      "mtom_solver": "newton",
+      "newton_max_rel_step": 0.35,
+      "newton_min_step_kg": 0.1,
+      "newton_slope_eps": 1e-06,
+      "newton_relax_init": 1.0,
+      "newton_relax_min": 0.05,
+      "newton_relax_decrease": 0.5,
+      "newton_relax_increase": 1.3,
+      "newton_fp_relax": 1.0,
+      "newton_use_bracketing": true,
+      "newton_prebracket_allow_after_iters": 2,
+      "initial_bracket_probe_enable": true,
+      "initial_bracket_probe_iters": 2,
+      "initial_bracket_probe_rel_span": 0.065,
+      "initial_bracket_probe_min_span_kg": 140.0,
+      "bracket_stall_reset_iters": 4,
+      "bracket_min_span_kg": 0.5,
+      "infeasible_pos_streak_iters": 5,
+      "infeasible_min_residual_reduction": 0.05,
+      "infeasible_min_mtom_drop_kg": 1.0
+    },
+    "constraint_sizing": {
+      "enable": true,
+      "selection": "min_combined_pw",
+      "ws_min_pa": 1900.0,
+      "ws_max_pa": 2600.0,
+      "ws_step_pa": 50.0,
+      "ws_refine_passes": 5,
+      "ws_refine_span_fraction": 0.2,
+      "ws_auto_widen_enable": true,
+      "ws_auto_widen_factor": 1.5,
+      "ws_auto_widen_max_passes": 2,
+      "pw_margin_fraction": 0.0,
+      "propulsion_type": "electric",
+      "takeoff_constraint": "take-off",
+      "climb_constraint": "climb",
+      "cruise_constraint": "cruise",
+      "use_combined_for_phases": false,
+      "scan_quiet": false,
+      "write_trade_csv": true
+    },
+    "constraint_brief": {
+      "rwyelevation_m": 0.0,
+      "groundrun_m": 400.0,
+      "stloadfactor": 1.5,
+      "turnalt_m": 5000.0,
+      "turnspeed_ktas": 160.0,
+      "climbalt_m": 5000.0,
+      "climbspeed_kias": 160.0,
+      "climbrate_fpm": 1300.0,
+      "cruisealt_m": 5000.0,
+      "cruisespeed_ktas": 150.0,
+      "cruisethrustfact": 1.0,
+      "servceil_m": 6000.0,
+      "secclimbspd_kias": 110.0,
+      "vstallclean_kcas": 100.0
+    },
+    "constraint_performance": {
+      "cdto": 0.0414,
+      "clto": 1.2,
+      "clmax_to": 2.15,
+      "clmax_clean": 1.45,
+      "cdmin_clean": 0.0254,
+      "mu_r": 0.02,
+      "etaprop_takeoff": 0.7,
+      "etaprop_climb": 0.8,
+      "etaprop_cruise": 0.85,
+      "etaprop_turn": 0.85,
+      "etaprop_servceil": 0.8
+    },
+    "constraint_geometry": {
+      "sweep_le_deg": 2.0,
+      "sweep_mt_deg": 0.0
+    },
+    "initial_mtom_kg": 5000.0,
+    "initial_total_power_guess_w": 1000000.0
+  },
+  "config_initial": {
+    "mission": {
+      "times_min": [
+        0,
+        5,
+        15,
+        16,
+        23,
+        25,
+        70,
+        71,
+        100,
+        110,
+        112,
+        116,
+        118,
+        135,
+        135,
+        135,
+        140,
+        150,
+        160,
+        160
+      ]
+    },
+    "flight": {
+      "h_cr_m": 5000.0,
+      "mach_cr": 0.24073552456308092,
+      "loiter_speed_ratio_to_cruise": 0.83,
+      "h_takeoff_m": 0.0,
+      "mach_takeoff": 0.16
+    },
+    "fuel_cell_arch": {
+      "n_stacks_series": 1,
+      "n_stacks_parallel": 2,
+      "volt_req_v": 700.0
+    },
+    "fuel_cell_op": {
+      "oversizing": 0.0,
+      "beta": "True"
+    },
+    "hybrid": {
+      "psi_takeoff": 0.4,
+      "psi_climb": 0.4,
+      "psi_cruise_charger": 0.0
+    },
+    "eff": {
+      "eta_converter": 0.97,
+      "eta_pdu": 0.98,
+      "eta_inverter": 0.97,
+      "eta_motor": 0.95,
+      "eta_prop": 0.83,
+      "eta_em": 0.9215
+    },
+    "densities": {
+      "rhofc_w_per_kg": 3000.0,
+      "rhopmad_w_per_kg": 15000.0,
+      "rhoem_w_per_kg": 7000.0
+    },
+    "p_w": {
+      "p_w_climb_kw_per_kg": 0.1139,
+      "p_w_cruise_kw_per_kg": 0.0876,
+      "p_w_takeoff_kw_per_kg": 0.0739
+    },
+    "cooling": {
+      "dT_K": 60.0
+    },
+    "hydrogen": {
+      "rho_h2_kg_m3": 70.0,
+      "eta_storage": 0.4,
+      "eta_vol": 0.5,
+      "coversize": 1.5,
+      "range_total_km": 1000.0,
+      "h_to_m": 0.0,
+      "vv_mps": 6.603999999999999
+    },
+    "wing": {
+      "wing_loading_kg_per_m2": 288.60416146186515,
+      "aspect_ratio": 9.0,
+      "t_c": 0.15,
+      "n_ult": 4.5,
+      "lc4_deg": 0.0,
+      "taper": 0.4
+    },
+    "fuselage": {
+      "dfus_m": 1.65,
+      "finerat_fus_nose": 0.6,
+      "finerat_fus_tail": 0.8,
+      "fnose": 1.0,
+      "ftail": 2.0,
+      "lseat_m": 1.02,
+      "npass": 9,
+      "nseat_abreast": 3,
+      "ldoor_m": 1.0,
+      "lht_ft": 27.0,
+      "legacy_kc_overwrite_bug": false
+    },
+    "tail": {
+      "enable": true,
+      "ll_ht": 0.49380955,
+      "ll_vt": 0.48267689,
+      "c_ht": 0.6,
+      "c_vt": 0.07,
+      "l_wing_m": 8.7,
+      "main_wing_location": false,
+      "main_wing_loacation_m": 8.7,
+      "a_ht": 5.0,
+      "lamda_ht": 0.4,
+      "a_vt": 1.9,
+      "lamda_vt": 0.4,
+      "x_fuse_mm": 0.0,
+      "ac": 0.25,
+      "wingpos": "rand",
+      "theta_le_deg": 5.0,
+      "theta_le_ht_deg": 10.0,
+      "theta_le_vt_deg": 25.0,
+      "delta_hs_cap_length_mm": 600.0,
+      "delta_vs_cap_length_mm": 300.0,
+      "max_iter": 200,
+      "tol_m": 1e-05
+    },
+    "weights": {
+      "oemmisc_base_kg": 0.0,
+      "payload_kg": 1000.0,
+      "rhobatt_kwh_per_kg": 0.3,
+      "battery_sizing_mode": "TO_Climb_only",
+      "battery_use_time_hr": 0.234,
+      "battery_reserve_fraction": 0.25
+    },
+    "solver": {
+      "power_tol_w": 1000.0,
+      "mtom_tol_kg": 5.0,
+      "max_outer_iter": 200,
+      "max_inner_iter": 200,
+      "compressor_mass_mode": "surrogate",
+      "mtom_solver": "newton",
+      "newton_max_rel_step": 0.35,
+      "newton_min_step_kg": 0.1,
+      "newton_slope_eps": 1e-06,
+      "newton_relax_init": 1.0,
+      "newton_relax_min": 0.05,
+      "newton_relax_decrease": 0.5,
+      "newton_relax_increase": 1.3,
+      "newton_fp_relax": 1.0,
+      "newton_use_bracketing": true,
+      "newton_prebracket_allow_after_iters": 2,
+      "initial_bracket_probe_enable": true,
+      "initial_bracket_probe_iters": 2,
+      "initial_bracket_probe_rel_span": 0.065,
+      "initial_bracket_probe_min_span_kg": 140.0,
+      "bracket_stall_reset_iters": 4,
+      "bracket_min_span_kg": 0.5,
+      "infeasible_pos_streak_iters": 5,
+      "infeasible_min_residual_reduction": 0.05,
+      "infeasible_min_mtom_drop_kg": 1.0
+    },
+    "constraint_sizing": {
+      "enable": true,
+      "selection": "min_combined_pw",
+      "ws_min_pa": 1900.0,
+      "ws_max_pa": 2600.0,
+      "ws_step_pa": 50.0,
+      "ws_refine_passes": 5,
+      "ws_refine_span_fraction": 0.2,
+      "ws_auto_widen_enable": true,
+      "ws_auto_widen_factor": 1.5,
+      "ws_auto_widen_max_passes": 2,
+      "pw_margin_fraction": 0.0,
+      "propulsion_type": "electric",
+      "takeoff_constraint": "take-off",
+      "climb_constraint": "climb",
+      "cruise_constraint": "cruise",
+      "use_combined_for_phases": false,
+      "scan_quiet": false,
+      "write_trade_csv": true
+    },
+    "constraint_brief": {
+      "rwyelevation_m": 0.0,
+      "groundrun_m": 400.0,
+      "stloadfactor": 1.5,
+      "turnalt_m": 5000.0,
+      "turnspeed_ktas": 160.0,
+      "climbalt_m": 5000.0,
+      "climbspeed_kias": 160.0,
+      "climbrate_fpm": 1300.0,
+      "cruisealt_m": 5000.0,
+      "cruisespeed_ktas": 150.0,
+      "cruisethrustfact": 1.0,
+      "servceil_m": 6000.0,
+      "secclimbspd_kias": 110.0,
+      "vstallclean_kcas": 100.0
+    },
+    "constraint_performance": {
+      "cdto": 0.0414,
+      "clto": 1.2,
+      "clmax_to": 2.15,
+      "clmax_clean": 1.45,
+      "cdmin_clean": 0.0254,
+      "mu_r": 0.02,
+      "etaprop_takeoff": 0.7,
+      "etaprop_climb": 0.8,
+      "etaprop_cruise": 0.85,
+      "etaprop_turn": 0.85,
+      "etaprop_servceil": 0.8
+    },
+    "constraint_geometry": {
+      "sweep_le_deg": 2.0,
+      "sweep_mt_deg": 0.0
+    },
+    "initial_mtom_kg": 5000.0,
+    "initial_total_power_guess_w": 1000000.0
+  },
+  "mass": {
+    "mtom_kg": 9063.469193563957,
+    "m_fc_system_kg": 2751.1430728241094,
+    "m_pmad_kg": 203.84744227849544,
+    "m_e_motor_kg": 322.51015235013244,
+    "m_powertrain_total_kg": 3277.500667452737,
+    "m_fuel_kg": 302.09125699888017,
+    "m_tank_kg": 679.7053282474803,
+    "m_battery_kg": 913.5416512910082,
+    "w_wing_kg": 687.9824822682108,
+    "w_fus_kg": 408.662079915208,
+    "w_ht_kg": 52.20691075385084,
+    "w_vt_kg": 86.15336146188037,
+    "w_lnd_main_kg": 243.04161115535297,
+    "w_lnd_nose_kg": 64.61787639481669,
+    "w_motor_misc_kg": 431.8,
+    "w_flight_control_kg": 365.9069031039231,
+    "w_els_kg": 299.7330159274236,
+    "w_iae_kg": 124.30905571671113,
+    "w_hydraulics_kg": 108.7617009497735,
+    "w_furnishings_kg": 449.25529192669916,
+    "oem_misc_kg": 1793.9857273904313,
+    "oem_kg": 7761.377936565076,
+    "payload_kg": 1000.0,
+    "wing_span_m": 18.59893575524726,
+    "wing_area_m2": 38.435601247535,
+    "fuselage_length_m": 15.064852963868198,
+    "tank_length_m": 6.054852963868198,
+    "tank_volume_m3": 12.946768157094864,
+    "s_ht_m2": 6.433840772827541,
+    "s_vt_m2": 6.6474909901876265,
+    "b_ht_m": 5.380732615334452,
+    "b_vt_m": 3.5539038930950975,
+    "l_ht_act_m": 7.860814080933655,
+    "l_vt_act_m": 7.52770172291782,
+    "x_true_ht_m": 12.75668387963504,
+    "x_true_vt_m": 12.09274477357113,
+    "p_fuelcell_engine_w": 121610.73626594449,
+    "p_fuelcell_taxing_w": 243221.47253188898,
+    "nacelle_design_power_kw_per_kg": 0.5324498872289369,
+    "nacelle_stack_dim_m": [
+      0.34966279261257655,
+      0.34966279261257655,
+      0.4250206674259215
+    ],
+    "nacelle_hx_dim_m": [
+      1.929,
+      1.929,
+      0.190810043750729
+    ]
+  },
+  "phases": {
+    "cruise": {
+      "name": "cruise",
+      "mtom_kg": 9063.47507914779,
+      "p_shaft_w": 548178.6093812325,
+      "p_fuelcell_w": 753964.4046739115,
+      "p_battery_w": 0.0,
+      "p_bus_required_w": 753964.4046739115,
+      "p_comp_w": 77976.51162975642,
+      "p_cooling_w": 352196.61459495185,
+      "p_total_w": 831940.9163036679,
+      "heat_rejected_kw": 2365.57365433284,
+      "mdot_h2_kgps": 0.022045007688500037,
+      "nacelle": {
+        "m_sys_kg": 836.0768844908087,
+        "m_stacks_kg": 251.05279513517254,
+        "m_comp_kg": 170.85310497374516,
+        "m_humid_kg": 94.36743243000002,
+        "m_hx_kg": 319.8035519518908,
+        "eta_fcsys": 0.2539366507237922,
+        "mdot_h2_kgps": 0.011022503844250018,
+        "power_comp_w": 38988.25581487821,
+        "q_all_w": 1182786.82716642,
+        "v_cr_mps": 77.16666666666667,
+        "dim_stack_m": [
+          0.27387176056044515,
+          0.27387176056044515,
+          0.37311575450394235
+        ],
+        "dim_hx_m": [
+          1.368,
+          1.368,
+          0.190810043750729
+        ],
+        "res_stack": [
+          1615.5787725197117,
+          0.07500574123247779
+        ],
+        "figs": []
+      }
+    },
+    "loiter": {
+      "name": "loiter",
+      "mtom_kg": 9063.47507914779,
+      "p_shaft_w": 438542.88750498596,
+      "p_fuelcell_w": 603171.5237391291,
+      "p_battery_w": 0.0,
+      "p_bus_required_w": 603171.5237391291,
+      "p_comp_w": 62382.984343388765,
+      "p_cooling_w": 283267.9341394726,
+      "p_total_w": 665554.5080825179,
+      "heat_rejected_kw": 1901.9037422357449,
+      "mdot_h2_kgps": 0.01769955678006937,
+      "nacelle": {
+        "m_sys_kg": 741.7340861893463,
+        "m_stacks_kg": 201.47824052492476,
+        "m_comp_kg": 164.23514646100267,
+        "m_humid_kg": 76.50808425000001,
+        "m_hx_kg": 299.51261495341885,
+        "eta_fcsys": 0.25302306583433953,
+        "mdot_h2_kgps": 0.008849778390034684,
+        "power_comp_w": 31191.492171694383,
+        "q_all_w": 950951.8711178724,
+        "v_cr_mps": 64.04833333333333,
+        "dim_stack_m": [
+          0.24495784274491064,
+          0.24495784274491064,
+          0.3742814306401404
+        ],
+        "dim_hx_m": [
+          1.353,
+          1.353,
+          0.18302292078782956
+        ],
+        "res_stack": [
+          1621.4071532007022,
+          0.060004344722240366
+        ],
+        "figs": []
+      }
+    },
+    "climb": {
+      "name": "climb",
+      "mtom_kg": 9063.47507914779,
+      "p_shaft_w": 1780094.785896556,
+      "p_fuelcell_w": 1451053.3596645321,
+      "p_battery_w": 967368.9064430215,
+      "p_bus_required_w": 2418422.2661075536,
+      "p_comp_w": 13792.459211335992,
+      "p_cooling_w": 699239.0818928853,
+      "p_total_w": 2432214.7253188896,
+      "heat_rejected_kw": 4700.061261562242,
+      "mdot_h2_kgps": 0.04158689967924058,
+      "nacelle": {
+        "m_sys_kg": 1375.5715364120547,
+        "m_stacks_kg": 467.01133720618816,
+        "m_comp_kg": 38.95208173772012,
+        "m_humid_kg": 234.2035579500001,
+        "m_hx_kg": 635.4045595181464,
+        "eta_fcsys": 0.23707076442710104,
+        "mdot_h2_kgps": 0.02079344983962029,
+        "power_comp_w": 6896.229605667996,
+        "q_all_w": 2350030.630781121,
+        "v_cr_mps": 77.16666666666667,
+        "dim_stack_m": [
+          0.34966279261257655,
+          0.34966279261257655,
+          0.4250206674259215
+        ],
+        "dim_hx_m": [
+          1.929,
+          1.929,
+          0.190810043750729
+        ],
+        "res_stack": [
+          1875.1033371296073,
+          0.12226406853762573
+        ],
+        "figs": []
+      }
+    },
+    "takeoff": {
+      "name": "takeoff",
+      "mtom_kg": 9063.47507914779,
+      "p_shaft_w": 1744718.262234586,
+      "p_fuelcell_w": 1422216.0056541394,
+      "p_battery_w": 948144.0037694263,
+      "p_bus_required_w": 2370360.0094235656,
+      "p_comp_w": 12493.618277350153,
+      "p_cooling_w": 528406.0265427157,
+      "p_total_w": 2382853.6277009156,
+      "heat_rejected_kw": 3550.900313839577,
+      "mdot_h2_kgps": 0.03364062729687696,
+      "nacelle": {
+        "m_sys_kg": 1154.3139153732216,
+        "m_stacks_kg": 384.6319393544759,
+        "m_comp_kg": 20.95024258037155,
+        "m_humid_kg": 115.82724600000002,
+        "m_hx_kg": 632.9044874383741,
+        "eta_fcsys": 0.2870411712676656,
+        "mdot_h2_kgps": 0.01682031364843848,
+        "power_comp_w": 6246.809138675077,
+        "q_all_w": 1775450.1569197886,
+        "v_cr_mps": 54.44703808417424,
+        "dim_stack_m": [
+          0.3452279456790934,
+          0.3452279456790934,
+          0.3599513641794808
+        ],
+        "dim_hx_m": [
+          1.917,
+          1.917,
+          0.19225707285791005
+        ],
+        "res_stack": [
+          1549.756820897404,
+          0.11918233447780703
+        ],
+        "figs": []
+      }
+    },
+    "cruise_charger": {
+      "name": "cruise_charger",
+      "mtom_kg": 9063.47507914779,
+      "p_shaft_w": 548178.6093812325,
+      "p_fuelcell_w": 753964.4046739115,
+      "p_battery_w": 0.0,
+      "p_bus_required_w": 753964.4046739115,
+      "p_comp_w": 77976.51162975642,
+      "p_cooling_w": 352196.61459495185,
+      "p_total_w": 831940.9163036679,
+      "heat_rejected_kw": 2365.57365433284,
+      "mdot_h2_kgps": 0.022045007688500037,
+      "nacelle": {
+        "m_sys_kg": 836.0768844908087,
+        "m_stacks_kg": 251.05279513517254,
+        "m_comp_kg": 170.85310497374516,
+        "m_humid_kg": 94.36743243000002,
+        "m_hx_kg": 319.8035519518908,
+        "eta_fcsys": 0.2539366507237922,
+        "mdot_h2_kgps": 0.011022503844250018,
+        "power_comp_w": 38988.25581487821,
+        "q_all_w": 1182786.82716642,
+        "v_cr_mps": 77.16666666666667,
+        "dim_stack_m": [
+          0.27387176056044515,
+          0.27387176056044515,
+          0.37311575450394235
+        ],
+        "dim_hx_m": [
+          1.368,
+          1.368,
+          0.190810043750729
+        ],
+        "res_stack": [
+          1615.5787725197117,
+          0.07500574123247779
+        ],
+        "figs": []
+      }
+    }
+  }
+}
