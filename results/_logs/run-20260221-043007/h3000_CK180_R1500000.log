@@ -1,0 +1,20 @@
+[command] /home/shoh95/anaconda3/envs/aerofc/bin/python /home/shoh95/Programming/HFCAD/app/main.py -i /home/shoh95/Programming/HFCAD/app/input_sweep_gui_r1/h3000_CK180_R1500000.ini --outdir /home/shoh95/Programming/HFCAD/results/input_sweep_gui_r1
+[start] 2026-02-21 04:30:11
+
+Traceback (most recent call last):
+  File "/home/shoh95/Programming/HFCAD/app/main.py", line 5168, in <module>
+    elapsed_time = main()
+                   ^^^^^^
+  File "/home/shoh95/Programming/HFCAD/app/main.py", line 5108, in main
+    cfg = load_design_config(input_path)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/shoh95/Programming/HFCAD/app/main.py", line 1056, in load_design_config
+    fuel_cell_arch = _update_dataclass_from_section(cfg_default.fuel_cell_arch, "fuel_cell_arch", section("fuel_cell_arch"))
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/shoh95/Programming/HFCAD/app/main.py", line 964, in _update_dataclass_from_section
+    updates[f.name] = _coerce_value(section[f.name], f.type)
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/shoh95/Programming/HFCAD/app/main.py", line 891, in _coerce_value
+    return int(float(s))  # tolerates "3000.0"
+               ^^^^^^^^
+ValueError: could not convert string to float: 'True'

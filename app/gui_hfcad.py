@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import configparser
 import csv
+import difflib
 import itertools
 import json
 import math
@@ -235,12 +236,14 @@ def fmt_float_for_case(value: float) -> str:
     return s if s else "0"
 
 
-def parse_bool_text(value: str) -> Optional[bool]:
+def parse_bool_text(value: str, *, allow_numeric: bool = True) -> Optional[bool]:
     normalized = value.strip().lower()
-    if normalized in {"yes", "y", "true", "t", "1", "on"}:
+    if normalized in {"yes", "y", "true", "t", "on"}:
         return True
-    if normalized in {"no", "n", "false", "f", "0", "off"}:
+    if normalized in {"no", "n", "false", "f", "off"}:
         return False
+    if allow_numeric and normalized in {"1", "0"}:
+        return normalized == "1"
     return None
 
 
@@ -469,6 +472,7 @@ class HFCADGui(QMainWindow):
 
         self.parameter_options: List[str] = []
         self.loaded_parameter_items: List[Tuple[str, str]] = []
+        self.visible_loaded_parameter_items: List[Tuple[str, str]] = []
         self.sweep_parameters: List[SweepParameter] = []
         self.constant_parameters: List[ConstantParameter] = []
         self.generated_cases: List[Tuple[Path, Dict[str, str]]] = []
@@ -598,11 +602,7 @@ class HFCADGui(QMainWindow):
     ) -> None:
         self.loaded_parameter_items = sorted(loaded_items, key=lambda x: x[0])
         self.parameter_options = [name for name, _ in self.loaded_parameter_items]
-
-        self.sweep_param_combo.clear()
-        self.sweep_param_combo.addItems(self.parameter_options)
-        self.const_param_combo.clear()
-        self.const_param_combo.addItems(self.parameter_options)
+        self._refresh_parameter_selectors()
         self._refresh_loaded_params_table()
 
         if reset_user_parameters:
@@ -620,6 +620,85 @@ class HFCADGui(QMainWindow):
         self._refresh_sweep_table()
         self._refresh_constant_table()
         self._on_parameters_changed(refresh_sweep_editor=True, refresh_const_editor=True)
+
+    def _filter_query(self) -> str:
+        return self.parameter_search_edit.text().strip().lower()
+
+    @staticmethod
+    def _is_subsequence(query: str, text: str) -> bool:
+        if not query:
+            return True
+        idx = 0
+        for ch in text:
+            if ch == query[idx]:
+                idx += 1
+                if idx >= len(query):
+                    return True
+        return False
+
+    @staticmethod
+    def _fuzzy_ratio(query: str, text: str) -> float:
+        if not query or not text:
+            return 0.0
+        return difflib.SequenceMatcher(None, query, text).ratio()
+
+    def _fuzzy_match_text(self, query: str, text: str) -> bool:
+        if not query:
+            return True
+        hay = text.strip().lower()
+        if not hay:
+            return False
+        if query in hay:
+            return True
+        if self._is_subsequence(query, hay):
+            return True
+
+        # Compare against whole text and tokenized chunks for typo-tolerant matches.
+        if len(query) >= 3 and self._fuzzy_ratio(query, hay) >= 0.72:
+            return True
+        for token in re.split(r"[.\-_\s]+", hay):
+            if not token:
+                continue
+            if query in token or self._is_subsequence(query, token):
+                return True
+            if len(query) >= 3 and self._fuzzy_ratio(query, token) >= 0.72:
+                return True
+        return False
+
+    def _filtered_parameter_options(self) -> List[str]:
+        query = self._filter_query()
+        if not query:
+            return list(self.parameter_options)
+        return [name for name in self.parameter_options if self._fuzzy_match_text(query, name)]
+
+    def _refresh_parameter_selectors(self) -> None:
+        filtered_options = self._filtered_parameter_options()
+        previous_sweep = self.sweep_param_combo.currentText().strip()
+        previous_const = self.const_param_combo.currentText().strip()
+
+        self.sweep_param_combo.blockSignals(True)
+        self.sweep_param_combo.clear()
+        self.sweep_param_combo.addItems(filtered_options)
+        if previous_sweep:
+            idx = self.sweep_param_combo.findText(previous_sweep)
+            if idx >= 0:
+                self.sweep_param_combo.setCurrentIndex(idx)
+        self.sweep_param_combo.blockSignals(False)
+
+        self.const_param_combo.blockSignals(True)
+        self.const_param_combo.clear()
+        self.const_param_combo.addItems(filtered_options)
+        if previous_const:
+            idx = self.const_param_combo.findText(previous_const)
+            if idx >= 0:
+                self.const_param_combo.setCurrentIndex(idx)
+        self.const_param_combo.blockSignals(False)
+
+    def on_parameter_search_changed(self, _: str = "") -> None:
+        self._refresh_loaded_params_table()
+        self._refresh_parameter_selectors()
+        self.on_sweep_parameter_changed()
+        self.on_const_parameter_changed()
 
     def _build_ui(self) -> None:
         central = QWidget()
@@ -734,6 +813,14 @@ class HFCADGui(QMainWindow):
         loaded_actions.addWidget(self.add_loaded_to_constant_btn)
         loaded_actions.addStretch(1)
         loaded_layout.addLayout(loaded_actions)
+
+        loaded_search_row = QHBoxLayout()
+        self.parameter_search_edit = QLineEdit()
+        self.parameter_search_edit.setPlaceholderText("Search (supports fuzzy find, e.g., typos/partial)...")
+        self.parameter_search_edit.setClearButtonEnabled(True)
+        loaded_search_row.addWidget(QLabel("Search"))
+        loaded_search_row.addWidget(self.parameter_search_edit, 1)
+        loaded_layout.addLayout(loaded_search_row)
 
         self.loaded_params_table = QTableWidget(0, 2)
         self.loaded_params_table.setHorizontalHeaderLabels(["Parameter", "Value"])
@@ -895,6 +982,9 @@ class HFCADGui(QMainWindow):
         self.output_results_dir_label.setWordWrap(True)
         self.output_case_combo = NoWheelComboBox()
         self.output_file_combo = NoWheelComboBox()
+        self.output_search_edit = QLineEdit()
+        self.output_search_edit.setPlaceholderText("Search cases/files...")
+        self.output_search_edit.setClearButtonEnabled(True)
         self.output_refresh_btn = QPushButton("Refresh")
         self.output_update_notebook_btn = QPushButton("Update Selected Notebook")
         self.output_export_excel_btn = QPushButton("Export All Case Data -> Excel")
@@ -919,22 +1009,24 @@ class HFCADGui(QMainWindow):
         output_group_layout.addWidget(self.output_refresh_btn, 1, 2)
         output_group_layout.addWidget(self.output_update_notebook_btn, 1, 3)
         output_group_layout.addWidget(self.output_export_excel_btn, 1, 4)
-        output_group_layout.addWidget(QLabel("File"), 2, 0)
-        output_group_layout.addWidget(self.output_file_combo, 2, 1, 1, 4)
-        output_group_layout.addWidget(QLabel("Selected Path"), 3, 0)
-        output_group_layout.addWidget(self.output_file_path_label, 3, 1, 1, 4)
-        output_group_layout.addWidget(QLabel("Exported Excel"), 4, 0)
-        output_group_layout.addWidget(self.output_last_excel_label, 4, 1, 1, 4)
-        output_group_layout.addWidget(QLabel("Graph X"), 5, 0)
-        output_group_layout.addWidget(self.output_plot_x_combo, 5, 1)
-        output_group_layout.addWidget(QLabel("Graph Y"), 5, 2)
-        output_group_layout.addWidget(self.output_plot_y_combo, 5, 3)
-        output_group_layout.addWidget(self.output_plot_type_combo, 5, 4)
-        output_group_layout.addWidget(self.output_plot_btn, 5, 5)
-        output_group_layout.addWidget(QLabel("Hold Param"), 6, 0)
-        output_group_layout.addWidget(self.output_hold_param_combo, 6, 1, 1, 2)
-        output_group_layout.addWidget(QLabel("Hold Value"), 6, 3)
-        output_group_layout.addWidget(self.output_hold_value_combo, 6, 4, 1, 2)
+        output_group_layout.addWidget(QLabel("Search"), 2, 0)
+        output_group_layout.addWidget(self.output_search_edit, 2, 1, 1, 4)
+        output_group_layout.addWidget(QLabel("File"), 3, 0)
+        output_group_layout.addWidget(self.output_file_combo, 3, 1, 1, 4)
+        output_group_layout.addWidget(QLabel("Selected Path"), 4, 0)
+        output_group_layout.addWidget(self.output_file_path_label, 4, 1, 1, 4)
+        output_group_layout.addWidget(QLabel("Exported Excel"), 5, 0)
+        output_group_layout.addWidget(self.output_last_excel_label, 5, 1, 1, 4)
+        output_group_layout.addWidget(QLabel("Graph X"), 6, 0)
+        output_group_layout.addWidget(self.output_plot_x_combo, 6, 1)
+        output_group_layout.addWidget(QLabel("Graph Y"), 6, 2)
+        output_group_layout.addWidget(self.output_plot_y_combo, 6, 3)
+        output_group_layout.addWidget(self.output_plot_type_combo, 6, 4)
+        output_group_layout.addWidget(self.output_plot_btn, 6, 5)
+        output_group_layout.addWidget(QLabel("Hold Param"), 7, 0)
+        output_group_layout.addWidget(self.output_hold_param_combo, 7, 1, 1, 2)
+        output_group_layout.addWidget(QLabel("Hold Value"), 7, 3)
+        output_group_layout.addWidget(self.output_hold_value_combo, 7, 4, 1, 2)
         output_layout.addWidget(output_group)
 
         self.output_text = QPlainTextEdit()
@@ -1009,6 +1101,7 @@ class HFCADGui(QMainWindow):
         self.log_view_combo.currentIndexChanged.connect(self.on_log_view_changed)
         self.output_case_combo.currentIndexChanged.connect(self.on_output_case_changed)
         self.output_file_combo.currentIndexChanged.connect(self.on_output_file_changed)
+        self.output_search_edit.textChanged.connect(self.on_output_search_changed)
         self.output_refresh_btn.clicked.connect(self.on_refresh_outputs)
         self.output_update_notebook_btn.clicked.connect(self.on_update_selected_notebook)
         self.output_export_excel_btn.clicked.connect(self.on_export_all_case_data_to_excel)
@@ -1024,6 +1117,7 @@ class HFCADGui(QMainWindow):
         self.add_loaded_to_constant_btn.clicked.connect(self.on_add_loaded_selection_to_constants)
         self.import_case_btn.clicked.connect(self.on_import_case_file)
         self.import_case_folder_btn.clicked.connect(self.on_import_case_folder)
+        self.parameter_search_edit.textChanged.connect(self.on_parameter_search_changed)
 
     def _build_menu(self) -> None:
         menu_bar = self.menuBar()
@@ -1262,6 +1356,9 @@ class HFCADGui(QMainWindow):
     def on_output_file_changed(self, _: int = 0) -> None:
         self._refresh_output_preview()
 
+    def on_output_search_changed(self, _: str = "") -> None:
+        self._refresh_output_cases()
+
     def on_output_hold_parameter_changed(self, _: int = 0) -> None:
         self._refresh_hold_value_combo()
 
@@ -1498,6 +1595,7 @@ class HFCADGui(QMainWindow):
         self.output_results_dir_label.setText(str(out_dir))
         current_case_dir = str(self.output_case_combo.currentData() or "")
         current_file_path = str(self.output_file_combo.currentData() or "")
+        query = self.output_search_edit.text().strip().lower()
 
         self.output_case_combo.blockSignals(True)
         self.output_file_combo.blockSignals(True)
@@ -1512,13 +1610,19 @@ class HFCADGui(QMainWindow):
             return
 
         case_dirs = sorted((p for p in out_dir.iterdir() if p.is_dir()), key=lambda p: p.name)
-        if not case_dirs:
+        filtered_case_dirs = [p for p in case_dirs if not query or self._fuzzy_match_text(query, p.name)]
+        if not filtered_case_dirs:
             self.output_file_path_label.setText("No output file selected.")
-            self._show_output_text_preview(f"No case output directories found under:\n{out_dir}")
+            if query:
+                self._show_output_text_preview(
+                    f"No case output directories match search '{query}' under:\n{out_dir}"
+                )
+            else:
+                self._show_output_text_preview(f"No case output directories found under:\n{out_dir}")
             return
 
         self.output_case_combo.blockSignals(True)
-        for case_dir in case_dirs:
+        for case_dir in filtered_case_dirs:
             self.output_case_combo.addItem(case_dir.name, str(case_dir))
 
         target_idx = 0
@@ -1533,6 +1637,7 @@ class HFCADGui(QMainWindow):
     def _refresh_output_files(self, preferred_file_path: str = "") -> None:
         case_dir_data = self.output_case_combo.currentData()
         case_dir = Path(str(case_dir_data)).expanduser() if case_dir_data else None
+        query = self.output_search_edit.text().strip().lower()
         self.output_file_combo.blockSignals(True)
         self.output_file_combo.clear()
         self.output_file_combo.blockSignals(False)
@@ -1543,9 +1648,21 @@ class HFCADGui(QMainWindow):
             return
 
         files = sorted((p for p in case_dir.rglob("*") if p.is_file()), key=lambda p: str(p.relative_to(case_dir)))
+        if query:
+            files = [
+                p
+                for p in files
+                if self._fuzzy_match_text(query, p.name)
+                or self._fuzzy_match_text(query, str(p.relative_to(case_dir)))
+            ]
         if not files:
             self.output_file_path_label.setText("No output file selected.")
-            self._show_output_text_preview(f"No files found in output case directory:\n{case_dir}")
+            if query:
+                self._show_output_text_preview(
+                    f"No files match search '{query}' in output case directory:\n{case_dir}"
+                )
+            else:
+                self._show_output_text_preview(f"No files found in output case directory:\n{case_dir}")
             return
 
         success_artifact = self.success_artifact_edit.text().strip()
@@ -2075,8 +2192,18 @@ class HFCADGui(QMainWindow):
             self._log(f"[template] Reloaded {len(options)} parameters from {template_path}")
 
     def _refresh_loaded_params_table(self) -> None:
-        self.loaded_params_table.setRowCount(len(self.loaded_parameter_items))
-        for i, (name, value) in enumerate(self.loaded_parameter_items):
+        query = self._filter_query()
+        if query:
+            self.visible_loaded_parameter_items = [
+                (name, value)
+                for name, value in self.loaded_parameter_items
+                if self._fuzzy_match_text(query, name) or self._fuzzy_match_text(query, value)
+            ]
+        else:
+            self.visible_loaded_parameter_items = list(self.loaded_parameter_items)
+
+        self.loaded_params_table.setRowCount(len(self.visible_loaded_parameter_items))
+        for i, (name, value) in enumerate(self.visible_loaded_parameter_items):
             self.loaded_params_table.setItem(i, 0, QTableWidgetItem(name))
             self.loaded_params_table.setItem(i, 1, QTableWidgetItem(value))
 
@@ -2084,8 +2211,8 @@ class HFCADGui(QMainWindow):
         rows = sorted({idx.row() for idx in self.loaded_params_table.selectionModel().selectedRows()})
         items: List[Tuple[str, str]] = []
         for row in rows:
-            if 0 <= row < len(self.loaded_parameter_items):
-                items.append(self.loaded_parameter_items[row])
+            if 0 <= row < len(self.visible_loaded_parameter_items):
+                items.append(self.visible_loaded_parameter_items[row])
         return items
 
     def on_add_loaded_selection_to_sweep(self) -> None:
@@ -2287,6 +2414,26 @@ class HFCADGui(QMainWindow):
             return [row]
         return []
 
+    def _reorder_sweep_parameters_by_link_group(self) -> None:
+        """Place actively linked groups first and sort those groups by group name."""
+        group_counts: Dict[str, int] = {}
+        for sp in self.sweep_parameters:
+            group_name = sp.link_group.strip()
+            if group_name:
+                group_counts[group_name] = group_counts.get(group_name, 0) + 1
+
+        indexed = list(enumerate(self.sweep_parameters))
+
+        def order_key(item: Tuple[int, SweepParameter]) -> Tuple[int, str, str, int]:
+            original_idx, sp = item
+            group_name = sp.link_group.strip()
+            if group_name and group_counts.get(group_name, 0) >= 2:
+                return (0, group_name.lower(), group_name, original_idx)
+            return (1, "", "", original_idx)
+
+        indexed.sort(key=order_key)
+        self.sweep_parameters = [sp for _, sp in indexed]
+
     @staticmethod
     def _table_item_text(table: QTableWidget, row: int, col: int) -> str:
         widget = table.cellWidget(row, col)
@@ -2419,9 +2566,42 @@ class HFCADGui(QMainWindow):
         for note in sync_notes:
             self._log(f"[sweep-sync] {note}")
 
+    def on_sweep_table_include_changed(self, param_name: str, value_text: str) -> None:
+        if self._updating_sweep_table:
+            return
+
+        include = parse_bool_text(value_text)
+        if include is None:
+            self._show_warning(f"Invalid In Case Name value for {param_name}: {value_text}")
+            self._refresh_sweep_table()
+            return
+
+        updated = False
+        for idx, sp in enumerate(self.sweep_parameters):
+            if sp.name == param_name and sp.include_in_name != include:
+                self.sweep_parameters[idx].include_in_name = include
+                updated = True
+                break
+
+        if not updated:
+            return
+
+        sync_notes = self._enforce_cruise_altitude_sweep_sync()
+        self._refresh_sweep_table()
+        self._refresh_constant_table()
+        self._on_parameters_changed(refresh_const_editor=True)
+        for note in sync_notes:
+            self._log(f"[sweep-sync] {note}")
+
     def _refresh_sweep_table(self) -> None:
         current_row = self.sweep_table.currentRow()
         current_col = self.sweep_table.currentColumn()
+        current_name = ""
+        if 0 <= current_row < len(self.sweep_parameters):
+            current_name = self.sweep_parameters[current_row].name
+
+        self._reorder_sweep_parameters_by_link_group()
+
         self._updating_sweep_table = True
         self.sweep_table.blockSignals(True)
         try:
@@ -2433,16 +2613,37 @@ class HFCADGui(QMainWindow):
                 self.sweep_table.setItem(i, 1, QTableWidgetItem(fmt_float_for_ini(sp.min_value)))
                 self.sweep_table.setItem(i, 2, QTableWidgetItem(fmt_float_for_ini(sp.max_value)))
                 self.sweep_table.setItem(i, 3, QTableWidgetItem(fmt_float_for_ini(sp.delta)))
-                self.sweep_table.setItem(i, 4, QTableWidgetItem("Yes" if sp.include_in_name else "No"))
+                include_item = QTableWidgetItem("Yes" if sp.include_in_name else "No")
+                include_item.setFlags(include_item.flags() & ~ITEM_IS_EDITABLE)
+                self.sweep_table.setItem(i, 4, include_item)
+                include_combo = NoWheelComboBox()
+                include_combo.addItems(["Yes", "No"])
+                include_combo.setCurrentText("Yes" if sp.include_in_name else "No")
+                include_combo.currentTextChanged.connect(
+                    lambda text, param_name=sp.name: self.on_sweep_table_include_changed(param_name, text)
+                )
+                self.sweep_table.setCellWidget(i, 4, include_combo)
                 self.sweep_table.setItem(i, 5, QTableWidgetItem(sp.abbreviation))
                 self.sweep_table.setItem(i, 6, QTableWidgetItem(sp.link_group))
         finally:
             self.sweep_table.blockSignals(False)
             self._updating_sweep_table = False
 
-        if 0 <= current_row < self.sweep_table.rowCount():
-            target_col = current_col if 0 <= current_col < self.sweep_table.columnCount() else 0
-            self.sweep_table.setCurrentCell(current_row, target_col)
+        target_row = -1
+        if current_name:
+            target_row = next(
+                (idx for idx, sp in enumerate(self.sweep_parameters) if sp.name == current_name),
+                -1,
+            )
+        elif 0 <= current_row < self.sweep_table.rowCount():
+            target_row = current_row
+
+        target_col = current_col if 0 <= current_col < self.sweep_table.columnCount() else 0
+        if 0 <= target_row < self.sweep_table.rowCount():
+            self.sweep_table.setCurrentCell(target_row, target_col)
+        elif self.sweep_table.rowCount() > 0:
+            fallback_row = min(max(current_row, 0), self.sweep_table.rowCount() - 1)
+            self.sweep_table.setCurrentCell(fallback_row, target_col)
         self._refresh_plot_metric_combos()
 
     def _loaded_value_for_parameter(self, param_name: str) -> str:
@@ -2474,7 +2675,11 @@ class HFCADGui(QMainWindow):
 
     def _parameter_value_options(self, param_name: str, current_value: str = "") -> List[str]:
         options = list(ENUM_CONFIG_OPTIONS.get(param_name, ()))
-        if not options and (param_name in BOOL_CONFIG_PARAMS or parse_bool_text(current_value) is not None):
+        # Infer bool options only from textual bool literals for unknown params.
+        # This avoids misclassifying numeric values like "0" and "1" as booleans.
+        if not options and (
+            param_name in BOOL_CONFIG_PARAMS or parse_bool_text(current_value, allow_numeric=False) is not None
+        ):
             options = ["True", "False"]
         if not options:
             return []

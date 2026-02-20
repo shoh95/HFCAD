@@ -878,6 +878,39 @@ def _normalize_wing_section(section_dict: Dict[str, str]) -> Dict[str, str]:
     return out
 
 
+def _parse_bool_literal(value: str) -> Optional[bool]:
+    """Parse common boolean literals and return None when not boolean-like."""
+    v = value.strip().lower()
+    if v in {"1", "true", "yes", "y", "on"}:
+        return True
+    if v in {"0", "false", "no", "n", "off"}:
+        return False
+    return None
+
+
+def _coerce_float_like(raw: str) -> float:
+    """Coerce a token to float, accepting boolean literals as 1.0/0.0."""
+    b = _parse_bool_literal(raw)
+    if b is not None:
+        return 1.0 if b else 0.0
+    return float(raw)
+
+
+def _coerce_int_like(raw: str) -> int:
+    """Coerce a token to int, accepting decimal and boolean literals."""
+    b = _parse_bool_literal(raw)
+    if b is not None:
+        return 1 if b else 0
+    return int(float(raw))  # tolerates inputs like "3000.0"
+
+
+def _strip_wrapping_quotes(raw: str) -> str:
+    """Remove a single matching pair of wrapping quotes from a token."""
+    if len(raw) >= 2 and ((raw[0] == raw[-1] == '"') or (raw[0] == raw[-1] == "'")):
+        return raw[1:-1]
+    return raw
+
+
 def _coerce_value(raw: str, typ):
     """Coerce a string value from the input file into the annotated field type."""
     s = raw.strip()
@@ -886,11 +919,11 @@ def _coerce_value(raw: str, typ):
     if isinstance(typ, str):
         t = typ.replace(" ", "")
         if t in ("float", "builtins.float"):
-            return float(s)
+            return _coerce_float_like(s)
         if t in ("int", "builtins.int"):
-            return int(float(s))  # tolerates "3000.0"
+            return _coerce_int_like(s)
         if t in ("str", "builtins.str"):
-            return s
+            return _strip_wrapping_quotes(s)
         if t in ("bool", "builtins.bool"):
             v = s.lower()
             if v in ("1", "true", "yes", "y", "on"):
@@ -915,15 +948,14 @@ def _coerce_value(raw: str, typ):
     raw = raw.strip()
 
     # Strip quotes for simple string values
-    if (raw.startswith('"') and raw.endswith('"')) or (raw.startswith("'") and raw.endswith("'")):
-        raw = raw[1:-1]
+    raw = _strip_wrapping_quotes(raw)
 
     if typ is str:
         return raw
     if typ is float:
-        return float(raw)
+        return _coerce_float_like(raw)
     if typ is int:
-        return int(raw)
+        return _coerce_int_like(raw)
     if typ is bool:
         return _parse_bool(raw)
 
@@ -961,7 +993,14 @@ def _update_dataclass_from_section(default_obj, section_name: str, section) -> o
     updates = {}
     for f in fields(default_obj):
         if f.name in section:
-            updates[f.name] = _coerce_value(section[f.name], f.type)
+            raw_value = section[f.name]
+            try:
+                updates[f.name] = _coerce_value(raw_value, f.type)
+            except Exception as exc:
+                raise ValueError(
+                    f"Invalid value in [{section_name}] {f.name}={raw_value!r} "
+                    f"(expected {f.type!r})."
+                ) from exc
 
     return replace(default_obj, **updates) if updates else default_obj
 
