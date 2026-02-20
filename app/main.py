@@ -4230,6 +4230,16 @@ def _converged_summary_text(
     """Converged summary used for console output and text export."""
     loiter_p_w_kw_per_kg = _LOITER_PW_RATIO_TO_CRUISE * float(cfg.p_w.p_w_cruise_kw_per_kg)
 
+    def _phase_pw_kw_per_kg(phase: Optional[PhasePowerResult]) -> float:
+        if phase is None or mass.mtom_kg <= 0.0:
+            return math.nan
+        return float(phase.p_total_w / mass.mtom_kg / 1000.0)
+
+    def _fmt_pw_kw_per_kg(value_kw_per_kg: float) -> str:
+        if not math.isfinite(float(value_kw_per_kg)):
+            return "n/a"
+        return f"{float(value_kw_per_kg):.5f}"
+
     def _fmt_kw(value_kw: float, width: int = 14) -> str:
         if not math.isfinite(float(value_kw)):
             return f"{'n/a':>{width}}"
@@ -4315,6 +4325,10 @@ def _converged_summary_text(
     climb = phases.get("climb")
     cruise = phases.get("cruise")
     loiter = phases.get("loiter")
+    conv_p_w_takeoff_kw_per_kg = _phase_pw_kw_per_kg(takeoff)
+    conv_p_w_climb_kw_per_kg = _phase_pw_kw_per_kg(climb)
+    conv_p_w_cruise_kw_per_kg = _phase_pw_kw_per_kg(cruise)
+    conv_p_w_loiter_kw_per_kg = _phase_pw_kw_per_kg(loiter)
 
     def _phase_row(
         phase_name: str,
@@ -4477,6 +4491,10 @@ def _converged_summary_text(
             f"Input W/S: {cfg.wing.wing_loading_kg_per_m2:,.2f} kg/m^2 ({cfg.wing.wing_loading_kg_per_m2*_G0_MPS2:,.1f} Pa)",
             f"Input P/W [kW/kg]: takeoff {cfg.p_w.p_w_takeoff_kw_per_kg:.5f}, climb {cfg.p_w.p_w_climb_kw_per_kg:.5f}, "
             f"cruise {cfg.p_w.p_w_cruise_kw_per_kg:.5f}, loiter {loiter_p_w_kw_per_kg:.5f}",
+            f"Converged P/W [kW/kg]: takeoff {_fmt_pw_kw_per_kg(conv_p_w_takeoff_kw_per_kg)}, "
+            f"climb {_fmt_pw_kw_per_kg(conv_p_w_climb_kw_per_kg)}, "
+            f"cruise {_fmt_pw_kw_per_kg(conv_p_w_cruise_kw_per_kg)}, "
+            f"loiter {_fmt_pw_kw_per_kg(conv_p_w_loiter_kw_per_kg)}",
             "-------------------------------------------------------------",
         ]
         lines = lines[:3] + hdr + lines[3:]
