@@ -370,10 +370,15 @@ class HydrogenConfig:
     eta_vol: float = 0.50
     coversize: float = 3.0
 
-    # Mission/range parameters (legacy)
-    range_total_m: float = 500_000.0
+    # Mission/range input parameter (km).
+    range_total_km: float = 500.0
     h_to_m: float = 0.0
     vv_mps: float = 8.0
+
+    @property
+    def range_total_m(self) -> float:
+        """Mission range in meters for internal sizing/mission-time calculations."""
+        return float((Q_(float(self.range_total_km), "kilometer")).to("meter").magnitude)
 
 
 @dataclass(frozen=True)
@@ -878,6 +883,34 @@ def _normalize_wing_section(section_dict: Dict[str, str]) -> Dict[str, str]:
     return out
 
 
+def _normalize_hydrogen_section(section_dict: Dict[str, str]) -> Dict[str, str]:
+    """Normalize [hydrogen] section keys/units.
+
+    Current input standard:
+      - range_total_km in km
+
+    Backward compatibility:
+      - accepts legacy range_total_m in meter and converts to range_total_km
+    """
+
+    out = dict(section_dict)
+
+    key_km = "range_total_km"
+    legacy_key_m = "range_total_m"
+
+    if key_km in out:
+        range_total_km = float(out[key_km])
+    elif legacy_key_m in out:
+        range_total_km = float((Q_(float(out[legacy_key_m]), "meter")).to("kilometer").magnitude)
+    else:
+        return out
+
+    out[key_km] = f"{range_total_km}"
+    out.pop(legacy_key_m, None)
+
+    return out
+
+
 def _parse_bool_literal(value: str) -> Optional[bool]:
     """Parse common boolean literals and return None when not boolean-like."""
     v = value.strip().lower()
@@ -1105,7 +1138,10 @@ def load_design_config(input_path: Path) -> DesignConfig:
     p_w = _update_dataclass_from_section(cfg_default.p_w, "p_w", p_w_sec)
 
     cooling = _update_dataclass_from_section(cfg_default.cooling, "cooling", section("cooling"))
-    hydrogen = _update_dataclass_from_section(cfg_default.hydrogen, "hydrogen", section("hydrogen"))
+    hydrogen_sec = section_dict("hydrogen")
+    if hydrogen_sec is not None:
+        hydrogen_sec = _normalize_hydrogen_section(hydrogen_sec)
+    hydrogen = _update_dataclass_from_section(cfg_default.hydrogen, "hydrogen", hydrogen_sec)
 
     wing_sec = section_dict("wing")
     if wing_sec is not None:

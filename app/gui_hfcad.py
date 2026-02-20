@@ -120,6 +120,9 @@ LOG_SUMMARY_KEY = "__summary__"
 OUTPUT_PREVIEW_TEXT = 0
 OUTPUT_PREVIEW_IMAGE = 1
 OUTPUT_HOLD_SLOT_COUNT = 3
+HYDROGEN_RANGE_PARAM = "hydrogen.range_total_km"
+HYDROGEN_RANGE_LEGACY_PARAM = "hydrogen.range_total_m"
+HYDROGEN_RANGE_LEGACY_M_THRESHOLD = 20_000.0
 CRUISE_ALT_SWEEP_PARAM = "constraint_brief.cruisealt_m"
 CLIMB_ALT_SWEEP_PARAM = "constraint_brief.climbalt_m"
 TURN_ALT_SWEEP_PARAM = "constraint_brief.turnalt_m"
@@ -237,6 +240,33 @@ def fmt_float_for_case(value: float) -> str:
         return str(int(round(value)))
     s = f"{value:.8f}".rstrip("0").rstrip(".")
     return s if s else "0"
+
+
+def normalize_gui_numeric_value(param_name: str, value: float) -> float:
+    """Normalize legacy unit conventions into current GUI units."""
+    if param_name == HYDROGEN_RANGE_LEGACY_PARAM:
+        return value / 1000.0
+    if param_name == HYDROGEN_RANGE_PARAM and value > HYDROGEN_RANGE_LEGACY_M_THRESHOLD:
+        return value / 1000.0
+    return value
+
+
+def normalize_gui_text_value(param_name: str, value: str) -> str:
+    text = value.strip()
+    if param_name not in {HYDROGEN_RANGE_PARAM, HYDROGEN_RANGE_LEGACY_PARAM}:
+        return text
+    try:
+        return fmt_float_for_ini(normalize_gui_numeric_value(param_name, float(text)))
+    except ValueError:
+        return text
+
+
+def normalize_gui_param_name_value(param_name: str, value: str) -> Tuple[str, str]:
+    normalized_name = param_name.strip()
+    normalized_value = normalize_gui_text_value(normalized_name, value)
+    if normalized_name == HYDROGEN_RANGE_LEGACY_PARAM:
+        return HYDROGEN_RANGE_PARAM, normalized_value
+    return normalized_name, normalized_value
 
 
 def parse_bool_text(value: str, *, allow_numeric: bool = True) -> Optional[bool]:
@@ -1326,10 +1356,19 @@ class HFCADGui(QMainWindow):
             self._show_warning("Could not read selected case INI file.")
             return
 
-        loaded_items: List[Tuple[str, str]] = []
+        loaded_map: Dict[str, str] = {}
         for section in cp.sections():
             for key in cp[section].keys():
-                loaded_items.append((f"{section}.{key}", cp[section][key]))
+                raw_name = f"{section}.{key}"
+                name, value = normalize_gui_param_name_value(raw_name, cp[section][key])
+                if (
+                    name == HYDROGEN_RANGE_PARAM
+                    and raw_name == HYDROGEN_RANGE_LEGACY_PARAM
+                    and HYDROGEN_RANGE_PARAM in loaded_map
+                ):
+                    continue
+                loaded_map[name] = value
+        loaded_items = sorted(loaded_map.items())
 
         self._set_parameter_source("case_file", case_path)
         self.template_edit.setText(str(case_path))
@@ -1444,7 +1483,15 @@ class HFCADGui(QMainWindow):
         data: Dict[str, str] = {}
         for section in cp.sections():
             for key in cp[section].keys():
-                data[f"{section}.{key}"] = cp[section][key]
+                raw_name = f"{section}.{key}"
+                name, value = normalize_gui_param_name_value(raw_name, cp[section][key])
+                if (
+                    name == HYDROGEN_RANGE_PARAM
+                    and raw_name == HYDROGEN_RANGE_LEGACY_PARAM
+                    and HYDROGEN_RANGE_PARAM in data
+                ):
+                    continue
+                data[name] = value
         return data
 
     def on_browse_input_out_dir(self) -> None:
@@ -1802,9 +1849,6 @@ class HFCADGui(QMainWindow):
 
         case_dirs = sorted((p for p in out_dir.iterdir() if p.is_dir()), key=lambda p: p.name)
         filtered_case_dirs = [p for p in case_dirs if not query or self._fuzzy_match_text(query, p.name)]
-        if query and not filtered_case_dirs and self._query_matches_output_metric(query):
-            # Keep case browsing available when the query is targeting graph parameters.
-            filtered_case_dirs = case_dirs
         if not filtered_case_dirs:
             self.output_file_path_label.setText("No output file selected.")
             if query:
@@ -1854,9 +1898,6 @@ class HFCADGui(QMainWindow):
                 if self._fuzzy_match_text(query, p.name)
                 or self._fuzzy_match_text(query, str(p.relative_to(case_dir)))
             ]
-            if not filtered_files and self._query_matches_output_metric(query):
-                # Keep file browsing available when the query is targeting graph parameters.
-                filtered_files = files
         if not filtered_files:
             self.output_file_path_label.setText("No output file selected.")
             if query:
@@ -1935,10 +1976,27 @@ class HFCADGui(QMainWindow):
         self.output_image_label.resize(scaled.size())
 
     def _refresh_plot_metric_combos(self, *, refresh_hold_values: bool = True) -> None:
-        ordered_metrics = self._filtered_output_metrics()
+        ordered_metrics = self._ordered_plot_metrics()
+        query = self._output_search_query()
         current_x = self._selected_metric_key(self.output_plot_x_combo)
         current_y = self._selected_metric_key(self.output_plot_y_combo)
         current_holds = [self._selected_metric_key(param_combo) for param_combo, _ in self.output_hold_pairs]
+        selected_metrics = [current_x, current_y, *current_holds]
+
+        if query:
+            filtered_metrics = [metric for metric in ordered_metrics if self._fuzzy_match_text(query, metric)]
+        else:
+            filtered_metrics = list(ordered_metrics)
+        display_metrics = list(filtered_metrics)
+
+        # Keep currently selected metrics available so search does not force x/y/hold changes.
+        for selected_metric in selected_metrics:
+            if (
+                selected_metric
+                and selected_metric in ordered_metrics
+                and selected_metric not in display_metrics
+            ):
+                display_metrics.append(selected_metric)
 
         self.output_plot_x_combo.blockSignals(True)
         self.output_plot_y_combo.blockSignals(True)
@@ -1950,7 +2008,7 @@ class HFCADGui(QMainWindow):
             hold_param_combo.clear()
             hold_param_combo.addItem("(No Hold)", "")
 
-        if not ordered_metrics:
+        if not display_metrics:
             self.output_plot_x_combo.blockSignals(False)
             self.output_plot_y_combo.blockSignals(False)
             for hold_param_combo, _ in self.output_hold_pairs:
@@ -1959,7 +2017,7 @@ class HFCADGui(QMainWindow):
                 self._refresh_hold_value_combo()
             return
 
-        for metric in ordered_metrics:
+        for metric in display_metrics:
             self.output_plot_x_combo.addItem(metric, metric)
             self.output_plot_y_combo.addItem(metric, metric)
             for hold_param_combo, _ in self.output_hold_pairs:
@@ -1968,7 +2026,7 @@ class HFCADGui(QMainWindow):
         x_idx = self._find_combo_data_index(self.output_plot_x_combo, current_x)
         y_idx = self._find_combo_data_index(self.output_plot_y_combo, current_y)
         self.output_plot_x_combo.setCurrentIndex(x_idx if x_idx >= 0 else 0)
-        self.output_plot_y_combo.setCurrentIndex(y_idx if y_idx >= 0 else (1 if len(ordered_metrics) > 1 else 0))
+        self.output_plot_y_combo.setCurrentIndex(y_idx if y_idx >= 0 else (1 if len(display_metrics) > 1 else 0))
         for hold_idx, (hold_param_combo, _) in enumerate(self.output_hold_pairs):
             current_hold = current_holds[hold_idx] if hold_idx < len(current_holds) else ""
             h_idx = self._find_combo_data_index(hold_param_combo, current_hold)
@@ -2001,21 +2059,6 @@ class HFCADGui(QMainWindow):
 
     def _output_search_query(self) -> str:
         return self.output_search_edit.text().strip().lower()
-
-    def _filtered_output_metrics(self) -> List[str]:
-        ordered_metrics = self._ordered_plot_metrics()
-        query = self._output_search_query()
-        if not query:
-            return ordered_metrics
-
-        matched_metrics = [metric for metric in ordered_metrics if self._fuzzy_match_text(query, metric)]
-        # Keep current behavior for non-metric searches (case/file focused).
-        return matched_metrics if matched_metrics else ordered_metrics
-
-    def _query_matches_output_metric(self, query: str) -> bool:
-        if not query:
-            return False
-        return any(self._fuzzy_match_text(query, metric) for metric in self._ordered_plot_metrics())
 
     def _resolve_sweep_metric_column(self, sweep: SweepParameter, metric_set: set[str]) -> Optional[str]:
         try:
@@ -2402,15 +2445,21 @@ class HFCADGui(QMainWindow):
             self._show_warning("Could not read template INI file.")
             return
 
-        options: List[str] = []
-        loaded_items: List[Tuple[str, str]] = []
+        loaded_map: Dict[str, str] = {}
         for section in cp.sections():
             for key in cp[section].keys():
-                name = f"{section}.{key}"
-                options.append(name)
-                loaded_items.append((name, cp[section][key]))
+                raw_name = f"{section}.{key}"
+                name, value = normalize_gui_param_name_value(raw_name, cp[section][key])
+                if (
+                    name == HYDROGEN_RANGE_PARAM
+                    and raw_name == HYDROGEN_RANGE_LEGACY_PARAM
+                    and HYDROGEN_RANGE_PARAM in loaded_map
+                ):
+                    continue
+                loaded_map[name] = value
 
-        options = sorted(options)
+        options: List[str] = sorted(loaded_map.keys())
+        loaded_items: List[Tuple[str, str]] = sorted(loaded_map.items())
         source_changed = self._set_parameter_source("template", template_path)
         self._load_parameter_items(loaded_items, reset_user_parameters=source_changed)
 
@@ -2532,6 +2581,9 @@ class HFCADGui(QMainWindow):
         except ValueError:
             self._show_warning("min, max, and delta must be numeric values.")
             return
+        min_value = normalize_gui_numeric_value(param, min_value)
+        max_value = normalize_gui_numeric_value(param, max_value)
+        delta = normalize_gui_numeric_value(param, delta)
 
         if delta <= 0:
             self._show_warning("delta must be greater than zero.")
@@ -2773,11 +2825,11 @@ class HFCADGui(QMainWindow):
 
         try:
             if col == 1:
-                sp.min_value = float(value_text)
+                sp.min_value = normalize_gui_numeric_value(sp.name, float(value_text))
             elif col == 2:
-                sp.max_value = float(value_text)
+                sp.max_value = normalize_gui_numeric_value(sp.name, float(value_text))
             elif col == 3:
-                delta = float(value_text)
+                delta = normalize_gui_numeric_value(sp.name, float(value_text))
                 if delta <= 0:
                     raise ValueError("delta must be greater than zero")
                 sp.delta = delta
@@ -2946,6 +2998,7 @@ class HFCADGui(QMainWindow):
             preferred = self._loaded_value_for_parameter(param)
         if not preferred:
             preferred = self.const_value_edit.text().strip()
+        preferred = normalize_gui_text_value(param, preferred)
 
         options = self._parameter_value_options(param, preferred)
         if options:
@@ -2969,9 +3022,10 @@ class HFCADGui(QMainWindow):
             return
 
         updated = False
+        normalized_value = normalize_gui_text_value(param_name, new_value)
         for idx, cp in enumerate(self.constant_parameters):
-            if cp.name == param_name and cp.value != new_value:
-                self.constant_parameters[idx] = ConstantParameter(name=cp.name, value=new_value)
+            if cp.name == param_name and cp.value != normalized_value:
+                self.constant_parameters[idx] = ConstantParameter(name=cp.name, value=normalized_value)
                 updated = True
                 break
 
@@ -2990,6 +3044,7 @@ class HFCADGui(QMainWindow):
         if value == "":
             self._show_warning("Constant parameter value cannot be empty.")
             return
+        value = normalize_gui_text_value(param, value)
 
         if any(sp.name == param for sp in self.sweep_parameters):
             self._show_warning("This parameter is already used as a sweep parameter.")
@@ -3037,6 +3092,7 @@ class HFCADGui(QMainWindow):
             return
 
         param_name = self.constant_parameters[row].name
+        value = normalize_gui_text_value(param_name, value)
         self.constant_parameters[row].value = value
         refresh_editor = self.const_param_combo.currentText().strip() == param_name
         self._commit_parameter_change(
@@ -3144,9 +3200,9 @@ class HFCADGui(QMainWindow):
             link_group = self._table_item_text(self.sweep_table, row, 6)
 
             try:
-                min_value = float(min_text)
-                max_value = float(max_text)
-                delta = float(delta_text)
+                min_value = normalize_gui_numeric_value(name, float(min_text))
+                max_value = normalize_gui_numeric_value(name, float(max_text))
+                delta = normalize_gui_numeric_value(name, float(delta_text))
                 if delta <= 0:
                     raise ValueError("delta must be greater than zero")
             except ValueError as exc:
@@ -3194,7 +3250,7 @@ class HFCADGui(QMainWindow):
                 errors.append(f"Constant row {row + 1} ({name}): value cannot be empty.")
                 continue
 
-            const_item = ConstantParameter(name=name, value=value)
+            const_item = ConstantParameter(name=name, value=normalize_gui_text_value(name, value))
             if name in const_pos:
                 updated_constants[const_pos[name]] = const_item
                 warnings.append(
@@ -3285,10 +3341,10 @@ class HFCADGui(QMainWindow):
                 continue
 
             if name in existing_values:
-                value = existing_values[name]
+                value = normalize_gui_text_value(name, existing_values[name])
                 kept_existing += 1
             else:
-                value = loaded_value
+                value = normalize_gui_text_value(name, loaded_value)
                 added += 1
 
             new_constants.append(ConstantParameter(name=name, value=value))
@@ -3496,6 +3552,9 @@ class HFCADGui(QMainWindow):
                 value_str = fmt_float_for_ini(value)
                 cp.set(section, key, value_str)
                 case_diff[sp.name] = value_str
+
+            if cp.has_section("hydrogen") and cp.has_option("hydrogen", "range_total_km"):
+                cp.remove_option("hydrogen", "range_total_m")
 
             case_name = self._build_case_name(combo, used_case_names)
             case_path = out_dir / f"{case_name}.ini"
