@@ -1,0 +1,138 @@
+Auto-widening W/S scan window for min_combined_pw: 1900.0..2600.0 -> 1725.0..2775.0 Pa (factor 1.500, lower_hit=True, upper_hit=False, min_on_edge=False).
+Auto-widening W/S scan window for min_combined_pw: 1725.0..2775.0 -> 1462.5..3037.5 Pa (factor 1.500, lower_hit=True, upper_hit=False, min_on_edge=False).
+ADRpy constraint sizing (min_combined_pw): W/S=2062.5 Pa (210.32 kg/m^2), P/W_TO=0.16394 kW/kg, P/W_climb=0.16919 kW/kg, P/W_cruise=0.09079 kW/kg
+Curve minimum (combined/combined): W/S=2062.5 Pa (210.32 kg/m^2), P/W=0.16919 kW/kg
+Curve minimum (takeoff/take-off): W/S=1462.5 Pa (149.13 kg/m^2), P/W=0.10196 kW/kg
+Curve minimum (climb/climb): W/S=2312.5 Pa (235.81 kg/m^2), P/W=0.16586 kW/kg
+Curve minimum (cruise/cruise): W/S=2312.5 Pa (235.81 kg/m^2), P/W=0.08550 kW/kg
+======================================================
+======================= ITER 1 =======================
+Fuel-cell system mass representative phase: climb (P_fc_sys=873.689 kW).
+
+-----------------------
+ptotal_climb: 1,162 kW, mtom_est: 5,061 kg, mtom: 5,000 kg, residual: +61.14 kg
+
+MTOM update: initial_bracket_probe_1, relax=1.000 -> mtom_next=5,325.00 kg
+
+======================================================
+======================= ITER 2 =======================
+Fuel-cell system mass representative phase: climb (P_fc_sys=930.473 kW).
+
+-----------------------
+ptotal_climb: 1,238 kW, mtom_est: 5,277 kg, mtom: 5,325 kg, residual: -48.07 kg
+
+MTOM update: newton, relax=1.000 -> mtom_next=5,181.95 kg
+
+======================================================
+======================= ITER 3 =======================
+Fuel-cell system mass representative phase: climb (P_fc_sys=905.485 kW).
+
+-----------------------
+ptotal_climb: 1,205 kW, mtom_est: 5,183 kg, mtom: 5,182 kg, residual: +1.26 kg
+
+
+CONVERGED
+
+CONVERGED STATE [MTOM iteration 3]
+  MTOM=5,183 kg | Wing loading=210.37 kg/m^2 | P/W(climb)=232.41 W/kg
+  Phase power: climb=1,204.6 kW | cruise=668.6 kW | loiter=534.9 kW | takeoff=1,167.1 kW | cruise+charger=668.6 kW
+  Power split (climb): FC=897.5 kW | Battery=299.2 kW | Compressor=8.0 kW | Cooling=378.2 kW | H2=22.346 g/s
+  Compressor max across phases: 21.5 kW (cruise)
+  FC representative phase (mass sizing): climb (905.5 kW)
+  Mass summary: MTOM=5,183 kg | Powertrain=1,501 kg | Tank=561.5 kg | Fuel=249.5 kg | Battery=125.0 kg | Nacelle power density=0.73 kW/kg
+  Geometry: Main wing area=24.64 m^2 | Horizontal tail area=3.404 m^2 | Horizontal tail location=12.169 m | Vertical tail area=3.433 m^2 | Vertical tail location=11.791 m
+  Config: wing loading input=210.32 kg/m^2 | P/W TO/Cl/Cr/Lo=0.16394/0.16919/0.09079/0.07263 kW/kg
+
+=============================================================
+========================= CONVERGED =========================
+=============================================================
+Constraint sizing: ENABLED (min_combined_pw)
+Input W/S: 210.32 kg/m^2 (2,062.5 Pa)
+Input P/W [kW/kg]: takeoff 0.16394, climb 0.16919, cruise 0.09079, loiter 0.07263
+Converged P/W [kW/kg]: takeoff 0.22517, climb 0.23241, cruise 0.12899, loiter 0.10319
+-------------------------------------------------------------
+
+# Mission Time
+Climb time: 5.05 min (0.08 h)
+Cruise time: 233.88 min (3.90 h)
+Total flight time: 260.93 min (4.35 h)
+
+# Phase Power Breakdown
+Phase      Time[min]     Total[kW]    FC Stack[kW]   Battery[kW]   Compressor[kW]   Cooling[kW]   mdot_H2[g/s]
+--------------------------------------------------------------------------------------------------------------
+ready           0.00          60.2            60.2           0.0              0.0           0.0         0.0
+taxi            5.00         120.5           120.5           0.0              0.0           0.0         2.2
+takeoff         1.00       1,167.1           869.6         289.9              7.6         341.4        20.6
+climb           5.05       1,204.6           897.5         299.2              8.0         378.2        22.3
+cruise        233.88         668.6           647.1           0.0             21.5         272.8        16.3
+loiter         15.00         534.9           517.7           0.0             17.2         219.8        13.1
+landing         1.00           0.0             0.0           0.0              0.0           0.0         0.0
+
+Pcomp_max (solved phases): 21.5 kW (cruise)
+Pnet (climb): 1,088 kW
+Pelectricnet (climb): 1,197 kW
+eta_pt: 0.9031
+
+# Geometry
+Main Wing Area: 24.64 m^2
+Wingspan: 14.89 m
+Fuselage Length: 14.01 m
+Hydrogen Tank Length: 5.00 m
+Horizontal Tail Area: 3.40 m^2
+Vertical Tail Area: 3.43 m^2
+Horizontal Tail span: 3.91 m
+Vertical Tail span: 2.55 m
+Horizontal Tail X_Position: 12.17 m
+Vertical Tail X_Position: 11.79 m
+
+# Single Nacelle (1/2)
+Stack(1/2): 254 kg, Compressor: 17 kg, Humidifier: 91 kg, HX: 258 kg
+Fuelcell System(FCS; Stack+Compressor+Humidifier+Hx): 620 kg
+Representative FC phase: climb
+Specific Power of Fuelcell System: 0.731 kW/kg
+Stack dimension: dX=0.376 m, dY=0.275 m, dZ=0.275 m
+Heat Exchanger dimension: dX=1.164 m, dY=1.164 m, dZ=0.213 m
+
+# ALL Nacelles
+FCS_total: 1,239 kg
+PMAD: 103 kg
+Motors: 159 kg
+
+# Total Mass Breakdown
+-----------------------
+Powertrain (FCS_total+PMAD+Motors): 1,501 kg
+-----------------------
+Main Wing: 375 kg
+Horizontal Tail: 23 kg
+Vertical Tail: 45 kg
+Fuselage: 416 kg
+Landing gear(main): 243 kg
+Landing gear(nose): 65 kg
+Flight Control System: 366 kg
+Electric System: 300 kg
+Instruments: 77 kg
+Hydraulics: 62 kg
+Furnishing: 424 kg
+-----------------------
+Operating Empty Mass(OEM): 2,396 kg
+-----------------------
+Hydrogen Tank: 561 kg
+Hydrogen Fuel: 249.5 kg
+Battery: 125.0 kg
+-----------------------
+Payload: 350 kg
+-----------------------
+Maximum Takeoff Mass(MTOM): 5,183 kg
+-----------------------
+
+Wing loading (MTOM/S_wing): 210.37 kg/m^2
+Power-to-weight (maxPow/MTOM): 232.41 W/kg
+
+mdot_H2(cruise): 16.3 g/s
+Hydrogen Tank Volume: 10.7 m^3
+========================== END ==============================
+
+
+=============================================================
+Execution time: 3.0 seconds
+=============================================================

@@ -1,0 +1,102 @@
+Auto-widening W/S scan window for min_combined_pw: 1900.0..2600.0 -> 1725.0..2775.0 Pa (factor 1.500, lower_hit=True, upper_hit=False, min_on_edge=False).
+Auto-widening W/S scan window for min_combined_pw: 1725.0..2775.0 -> 1462.5..3037.5 Pa (factor 1.500, lower_hit=True, upper_hit=False, min_on_edge=False).
+ADRpy constraint sizing (min_combined_pw): W/S=2262.5 Pa (230.71 kg/m^2), P/W_TO=0.18667 kW/kg, P/W_climb=0.18947 kW/kg, P/W_cruise=0.09679 kW/kg
+Curve minimum (combined/combined): W/S=2262.5 Pa (230.71 kg/m^2), P/W=0.18947 kW/kg
+Curve minimum (takeoff/take-off): W/S=1462.5 Pa (149.13 kg/m^2), P/W=0.10196 kW/kg
+Curve minimum (climb/climb): W/S=2312.5 Pa (235.81 kg/m^2), P/W=0.18884 kW/kg
+Curve minimum (cruise/cruise): W/S=2312.5 Pa (235.81 kg/m^2), P/W=0.09579 kW/kg
+======================================================
+======================= ITER 1 =======================
+Fuel-cell system mass representative phase: climb (P_fc_sys=978.831 kW).
+
+-----------------------
+ptotal_climb: 1,302 kW, mtom_est: 7,120 kg, mtom: 5,000 kg, residual: +2,119.60 kg
+
+MTOM update: initial_bracket_probe_1, relax=1.000 -> mtom_next=5,325.00 kg
+
+======================================================
+======================= ITER 2 =======================
+Fuel-cell system mass representative phase: climb (P_fc_sys=1042.448 kW).
+
+-----------------------
+ptotal_climb: 1,387 kW, mtom_est: 7,394 kg, mtom: 5,325 kg, residual: +2,069.06 kg
+
+MTOM update: initial_bracket_probe_2, relax=1.000 -> mtom_next=5,650.00 kg
+
+======================================================
+======================= ITER 3 =======================
+Fuel-cell system mass representative phase: climb (P_fc_sys=1106.072 kW).
+
+-----------------------
+ptotal_climb: 1,471 kW, mtom_est: 7,672 kg, mtom: 5,650 kg, residual: +2,021.50 kg
+
+MTOM update: newton_prebracket, relax=1.000 -> mtom_next=7,627.50 kg
+
+======================================================
+======================= ITER 4 =======================
+Fuel-cell system mass representative phase: climb (P_fc_sys=1493.206 kW).
+
+-----------------------
+ptotal_climb: 1,986 kW, mtom_est: 9,367 kg, mtom: 7,628 kg, residual: +1,739.02 kg
+
+MTOM update: newton_prebracket, relax=1.000 -> mtom_next=10,297.12 kg
+
+======================================================
+======================= ITER 5 =======================
+Fuel-cell system mass representative phase: climb (P_fc_sys=2015.829 kW).
+
+-----------------------
+ptotal_climb: 2,682 kW, mtom_est: 11,676 kg, mtom: 10,297 kg, residual: +1,378.90 kg
+
+MTOM update: newton_prebracket, relax=1.000 -> mtom_next=13,901.12 kg
+
+======================================================
+======================= ITER 6 =======================
+Fuel-cell system mass representative phase: climb (P_fc_sys=2721.369 kW).
+
+-----------------------
+ptotal_climb: 3,620 kW, mtom_est: 14,833 kg, mtom: 13,901 kg, residual: +931.64 kg
+
+MTOM update: newton_prebracket, relax=1.000 -> mtom_next=18,766.51 kg
+
+======================================================
+======================= ITER 7 =======================
+Fuel-cell system mass representative phase: climb (P_fc_sys=3673.848 kW).
+
+-----------------------
+ptotal_climb: 4,887 kW, mtom_est: 19,162 kg, mtom: 18,767 kg, residual: +395.93 kg
+
+MTOM update: newton_prebracket, relax=1.000 -> mtom_next=22,362.48 kg
+
+======================================================
+======================= ITER 8 =======================
+Traceback (most recent call last):
+  File "/home/shoh95/Programming/HFCAD/app/main.py", line 5082, in <module>
+    elapsed_time = main()
+                   ^^^^^^
+  File "/home/shoh95/Programming/HFCAD/app/main.py", line 5043, in main
+    cfg_used, phases, mass, _trade_df = runner.run(out_dir=out_dir)
+                                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/shoh95/Programming/HFCAD/app/main.py", line 3074, in run
+    return self._run_min_combined_pw(out_dir=out_dir)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/shoh95/Programming/HFCAD/app/main.py", line 3216, in _run_min_combined_pw
+    phases, mass = design.run()
+                   ^^^^^^^^^^^^
+  File "/home/shoh95/Programming/HFCAD/app/main.py", line 2542, in run
+    phases["climb"] = self._phase_solver.solve(
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/shoh95/Programming/HFCAD/app/main.py", line 1702, in solve
+    nacelle = self._fc.size_nacelle(
+              ^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/shoh95/Programming/HFCAD/app/main.py", line 1553, in size_nacelle
+    geom_comp, power_comp_w, rho_humid_in, m_dot_comp = compressor_performance_model(
+                                                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/shoh95/Programming/HFCAD/app/models/compressor_performance.py", line 100, in compressor_performance_model
+    raise ValueError("Rotor outlet enthalpy too high. Reduce RPM!")
+ValueError: Rotor outlet enthalpy too high. Reduce RPM!
+
+[run_sweep] FAIL criteria: artifact not found or empty
+[run_sweep] command exit: 1
+[run_sweep] expected artifact: results/input_sweep_r20/h4500_M0.35_R2000km_PL1500kg/ConvergedData.txt
+[run_sweep] exit code: 1
