@@ -20,6 +20,7 @@ import tempfile
 import time
 import math
 import logging
+from functools import lru_cache
 from dataclasses import dataclass, fields, replace
 from pathlib import Path
 from pprint import pformat
@@ -39,12 +40,36 @@ except ImportError as exc:  # pragma: no cover
         "  pip install pint\n"
     ) from exc
 
+try:  # pragma: no cover
+    from numba import njit  # type: ignore
+except Exception:  # pragma: no cover
+    def njit(*args, **kwargs):  # type: ignore
+        """Fallback decorator when numba is unavailable."""
+        if args and callable(args[0]) and len(args) == 1 and not kwargs:
+            return args[0]
+
+        def _decorator(func):
+            return func
+
+        return _decorator
+
 
 _ureg = UnitRegistry()
 Q_ = _ureg.Quantity
 _G0 = Q_(9.80665, "meter / second ** 2")
 _G0_MPS2 = float(_G0.to("meter / second ** 2").magnitude)
 _LOITER_PW_RATIO_TO_CRUISE = 0.8
+_SEA_LEVEL_PRESSURE_PA = float(Atmosphere(0.0).pressure[0])
+# Fast compressor-mass surrogate coefficients (calibrated against CAD model outputs).
+_COMP_MASS_C0 = -1.07005783
+_COMP_MASS_C1 = 0.518571993
+_COMP_MASS_C2 = 262.906263
+_COMP_MASS_C3 = 208.871692
+_COMP_MASS_C4 = 1162.02321
+_COMP_MASS_C5 = 2272.77970
+_COMP_MASS_C6 = -70.9721798
+_COMP_MASS_C7 = 55.3164451
+_COMP_MASS_C8 = -63.9226029
 
 # Ensure common aviation shorthand is available.
 # Pint usually includes 'knot' and 'nautical_mile', but some installations/older versions
@@ -63,6 +88,58 @@ for _alias in ("kn", "kt"):
             _ureg.define(f"{_alias} = knot")
         except Exception:
             pass
+
+
+@njit(cache=True, fastmath=True)
+def _total_pressure_pa(p_static_pa: float, mach: float) -> float:
+    return p_static_pa * (1.0 + 0.2 * mach * mach) ** 3.5
+
+
+@njit(cache=True, fastmath=True)
+def _total_temperature_k(t_static_k: float, mach: float) -> float:
+    return t_static_k * (1.0 + 0.2 * mach * mach)
+
+
+@njit(cache=True, fastmath=True)
+def _compressor_mass_surrogate_kg(
+    power_comp_w: float,
+    d1h: float,
+    d2: float,
+    d2s: float,
+    d3: float,
+    la: float,
+    b1: float,
+    b2: float,
+    b3: float,
+) -> float:
+    p_kw = power_comp_w * 1e-3
+    d2_sq = d2 * d2
+    m = (
+        _COMP_MASS_C0
+        + _COMP_MASS_C1 * p_kw
+        + _COMP_MASS_C2 * d2 * d2_sq
+        + _COMP_MASS_C3 * d3 * d3 * d3
+        + _COMP_MASS_C4 * la * d2_sq
+        + _COMP_MASS_C5 * (b1 + b2 + b3) * d2_sq
+        + _COMP_MASS_C6 * d2
+        + _COMP_MASS_C7 * d3
+        + _COMP_MASS_C8 * la
+        + 0.0 * d1h
+        + 0.0 * d2s
+    )
+    return m if m > 0.0 else 0.0
+
+
+@lru_cache(maxsize=128)
+def _atmosphere_at_altitude(altitude_m_rounded: float) -> Tuple[float, float, float, float, float]:
+    atm = Atmosphere(float(altitude_m_rounded))
+    return (
+        float(atm.speed_of_sound[0]),
+        float(atm.pressure[0]),
+        float(atm.temperature[0]),
+        float(atm.density[0]),
+        float(atm.dynamic_viscosity[0]),
+    )
 
 class UnitConverter:
     """Unit conversion helper backed by Pint.
@@ -430,6 +507,11 @@ class SolverConfig:
 
     max_outer_iter: int = 50
     max_inner_iter: int = 50
+
+    # Compressor mass model in FC sizing loop:
+    #   - 'surrogate' (default): fast geometry-based regression (recommended for sweeps)
+    #   - 'cadquery': full CAD mass build/export (slow, highest fidelity)
+    compressor_mass_mode: str = "surrogate"
 
     # Outer-loop MTOM closure algorithm:
     #   - 'newton' (default): safeguarded Newton/secant with trust region + bracketing fallback
@@ -1306,9 +1388,9 @@ class CoolingSystem:
         self._cfg = cfg
 
         # Legacy uses cruise ambient temperature to compute f_dT and then reuses it for all phases.
-        t_air = Q_(float(Atmosphere(cruise_altitude_m).temperature[0]), "kelvin")
-        d_t = Q_(float(cfg.dT_K), "kelvin")
-        t_ratio = float((t_air / d_t).to("dimensionless").magnitude)
+        t_air_k = float(Atmosphere(cruise_altitude_m).temperature[0])
+        d_t_k = max(float(cfg.dT_K), 1e-9)
+        t_ratio = t_air_k / d_t_k
 
         self._f_dT = 0.0038 * (t_ratio**2) + 0.0352 * t_ratio + 0.1817
 
@@ -1321,17 +1403,70 @@ class CoolingSystem:
             Heat rejected (kW). This is consistent with legacy usage.
         """
 
-        heat_rejected = Q_(float(heat_rejected_kw), "kilowatt")
-        cooling_power = (0.371 * heat_rejected + Q_(1.33, "kilowatt")) * self._f_dT
-        return float(cooling_power.to("watt").magnitude)
+        cooling_power_kw = (0.371 * float(heat_rejected_kw) + 1.33) * self._f_dT
+        return float(cooling_power_kw * 1000.0)
 
 
 class FuelCellSystemModel:
     """Fuel cell system sizing model (per nacelle)."""
 
-    def __init__(self, arch: FuelCellArchitecture, comp_stl_path: Optional[Path] = None):
+    def __init__(
+        self,
+        arch: FuelCellArchitecture,
+        comp_stl_path: Optional[Path] = None,
+        comp_mass_mode: Optional[str] = None,
+    ):
         self._arch = arch
         self._comp_stl_path = comp_stl_path
+        self._nacelle_cache: Dict[Tuple[float, float, float, float, float, bool], FuelCellSystemSizingResult] = {}
+        env_override = os.getenv("HFCAD_COMP_MASS_MODE")
+        selected_mode = env_override if env_override is not None else comp_mass_mode
+        self._comp_mass_mode = self._normalize_comp_mass_mode(selected_mode)
+
+    @staticmethod
+    def _normalize_comp_mass_mode(value: Optional[str]) -> str:
+        v = "surrogate" if value is None else str(value).strip().lower()
+        if v in {"surrogate", "fast", "approx", "regression"}:
+            return "surrogate"
+        if v in {"cadquery", "cad", "full"}:
+            return "cadquery"
+        logger.warning(
+            "Unknown solver.compressor_mass_mode=%r. Falling back to 'surrogate'.",
+            value,
+        )
+        return "surrogate"
+
+    @staticmethod
+    def _round_key(x: float, quantum: float) -> float:
+        if quantum <= 0.0:
+            return float(x)
+        return float(round(float(x) / quantum) * quantum)
+
+    def _compressor_mass_kg(self, *, geom_comp: Optional[Iterable[float]], power_comp_w: float) -> float:
+        if geom_comp is None:
+            return 0.0
+        geom = tuple(float(x) for x in geom_comp)
+
+        if self._comp_mass_mode in {"cad", "cadquery", "full"}:
+            return float(compressor_mass_model(list(geom), float(power_comp_w), stl_path=self._comp_stl_path))
+
+        if len(geom) >= 8:
+            return float(
+                _compressor_mass_surrogate_kg(
+                    float(power_comp_w),
+                    geom[0],
+                    geom[1],
+                    geom[2],
+                    geom[3],
+                    geom[4],
+                    geom[5],
+                    geom[6],
+                    geom[7],
+                )
+            )
+
+        # Fallback linear trend in case geometry format changes unexpectedly.
+        return max(0.0, 0.52 * float(power_comp_w) * 1e-3 + 0.2)
 
     def size_nacelle(
         self,
@@ -1351,37 +1486,52 @@ class FuelCellSystemModel:
         Parameters are aligned with the legacy `FuelCellSystem.size_system` routine.
         """
 
+        power_fc_sys_w = float(power_fc_sys_w)
+        altitude_m = float(flight_point.altitude_m)
+        mach = float(flight_point.mach)
+        beta = float(beta)
+        oversizing = float(oversizing)
+
+        # Quantized cache key for hot fixed-point iterations.
+        if not make_fig:
+            power_quantum_w = 0.0 if self._comp_mass_mode in {"cad", "cadquery", "full"} else 50.0
+            cache_key = (
+                self._round_key(power_fc_sys_w, power_quantum_w),
+                self._round_key(altitude_m, 1e-3),
+                self._round_key(mach, 1e-6),
+                self._round_key(beta, 1e-6),
+                self._round_key(oversizing, 1e-6),
+                bool(comp_bool),
+            )
+            cached = self._nacelle_cache.get(cache_key)
+            if cached is not None:
+                return cached
+
         # Atmospheric conditions
-        atm = Atmosphere(flight_point.altitude_m)
-        c = Q_(float(atm.speed_of_sound[0]), "meter / second")
-        v_cr = Q_(float(flight_point.mach), "dimensionless") * c
-        p = Q_(float(atm.pressure[0]), "pascal")
-        p_tot = p * (1 + 0.4 / 2 * flight_point.mach**2) ** (1.4 / 0.4)
-        t = Q_(float(atm.temperature[0]), "kelvin")
-        t_tot = t * (1 + 0.4 / 2 * flight_point.mach**2)
-        rho = Q_(float(atm.density[0]), "kilogram / meter ** 3")
-        mu = Q_(float(atm.dynamic_viscosity[0]), "pascal * second")
+        c_mps, p_pa, t_k, rho_kg_m3, mu_pa_s = _atmosphere_at_altitude(round(altitude_m, 3))
+        v_cr_mps = mach * c_mps
+        p_tot_pa = _total_pressure_pa(p_pa, mach)
+        t_tot_k = _total_temperature_k(t_k, mach)
 
         if verbose:
             try:
-                reynolds = (rho * v_cr * Q_(1.8, "meter") / mu).to("dimensionless").magnitude
+                reynolds = rho_kg_m3 * v_cr_mps * 1.8 / mu_pa_s
                 logger.info(f"Reynolds_number: {reynolds:,.0f}")
             except Exception:
                 pass
 
         # Other inputs
-        cell_temp = Q_(273.15 + 80.0, "kelvin")
+        cell_temp_k = 273.15 + 80.0
         mu_f = 0.95
 
         # Cathode inlet pressure
-        pres_cathode_in = (beta * p_tot if comp_bool else p_tot).to("pascal")
+        pres_cathode_in_pa = beta * p_tot_pa if comp_bool else p_tot_pa
 
         # Cell model (cached and optionally figure-producing)
-        pres_h = Q_(float(Atmosphere(0).pressure[0]), "pascal")
         volt_cell, power_dens_cell, eta_cell, fig = cell_model(
-            float(pres_cathode_in.magnitude),
-            float(pres_h.to("pascal").magnitude),
-            float(cell_temp.to("kelvin").magnitude),
+            float(pres_cathode_in_pa),
+            float(_SEA_LEVEL_PRESSURE_PA),
+            float(cell_temp_k),
             oversizing,
             make_fig=make_fig,
         )
@@ -1390,68 +1540,58 @@ class FuelCellSystemModel:
 
         # Compressor
         if comp_bool:
-            power_req_new = Q_(float(power_fc_sys_w), "watt")
-            power_comp = Q_(0.0, "watt")
+            power_req_new = float(power_fc_sys_w)
+            power_comp_w = 0.0
             geom_comp = None
-            rho_humid_in = float(rho.to("kilogram / meter ** 3").magnitude)
+            rho_humid_in = float(rho_kg_m3)
             m_dot_comp = None
 
-            tol = max(float(comp_tol_w), 1e-6 * abs(float(power_req_new.to("watt").magnitude)))
+            tol = max(float(comp_tol_w), 1e-6 * abs(power_req_new))
 
             for _ in range(int(max_comp_iter)):
-                power_req = float(power_req_new.to("watt").magnitude)
+                power_req = power_req_new
                 geom_comp, power_comp_w, rho_humid_in, m_dot_comp = compressor_performance_model(
                     power_req,
                     volt_cell,
-                    float(beta),
-                    float(p_tot.to("pascal").magnitude),
-                    float(t_tot.to("kelvin").magnitude),
-                    float(mu.to("pascal * second").magnitude),
+                    beta,
+                    float(p_tot_pa),
+                    float(t_tot_k),
+                    float(mu_pa_s),
                 )
-                power_comp = Q_(float(power_comp_w), "watt")
-                power_req_new = Q_(float(power_fc_sys_w), "watt") + power_comp
-                if abs(float(power_req_new.to("watt").magnitude) - power_req) <= tol:
+                power_comp_w = float(power_comp_w)
+                power_req_new = power_fc_sys_w + power_comp_w
+                if abs(power_req_new - power_req) <= tol:
                     break
             else:
                 if verbose:
                     logger.warning(
                         "Compressor iteration hit max_comp_iter=%s (|ΔP|=%.3f W, tol=%.3f W).",
                         max_comp_iter,
-                        abs(float(power_req_new.to("watt").magnitude) - power_req),
+                        abs(power_req_new - power_req),
                         tol,
                     )
 
-            m_comp = (
-                float(
-                    compressor_mass_model(
-                        geom_comp,
-                        float(power_comp.to("watt").magnitude),
-                        stl_path=self._comp_stl_path,
-                    )
-                )
-                if geom_comp is not None
-                else 0.0
-            )
+            m_comp = self._compressor_mass_kg(geom_comp=geom_comp, power_comp_w=float(power_comp_w))
         else:
             m_comp = 0.0
-            power_comp = Q_(0.0, "watt")
-            power_req_new = Q_(float(power_fc_sys_w), "watt")
-            m_dot_comp = float(mass_flow_stack(float(power_req_new.to("watt").magnitude), volt_cell))
-            rho_humid_in = float(rho.to("kilogram / meter ** 3").magnitude)
+            power_comp_w = 0.0
+            power_req_new = float(power_fc_sys_w)
+            m_dot_comp = float(mass_flow_stack(float(power_req_new), volt_cell))
+            rho_humid_in = float(rho_kg_m3)
 
         # Remaining BOP models
         m_humid = float(humidifier_model(m_dot_comp, rho_humid_in))
         q_all, m_hx, dim_hx = heat_exchanger_model(
-            float(power_req_new.to("watt").magnitude),
+            float(power_req_new),
             volt_cell,
-            float(cell_temp.to("kelvin").magnitude),
+            float(cell_temp_k),
             mu_f,
-            float(v_cr.to("meter / second").magnitude),
-            float(flight_point.mach),
-            float(p_tot.to("pascal").magnitude),
-            float(t_tot.to("kelvin").magnitude),
-            float(rho.to("kilogram / meter ** 3").magnitude),
-            float(mu.to("pascal * second").magnitude),
+            float(v_cr_mps),
+            float(mach),
+            float(p_tot_pa),
+            float(t_tot_k),
+            float(rho_kg_m3),
+            float(mu_pa_s),
         )
 
         # Stack model
@@ -1459,24 +1599,27 @@ class FuelCellSystemModel:
             self._arch.n_stacks_series,
             self._arch.volt_req_v,
             volt_cell,
-            float(power_req_new.to("watt").magnitude),
+            float(power_req_new),
             power_dens_cell,
         )
 
         # Aggregate
         m_sys = float(m_stacks + m_comp + m_humid + m_hx)
 
-        power_comp_w = float(power_comp.to("watt").magnitude)
-        eta_fcsys = float(eta_cell * float(power_fc_sys_w) / (power_comp_w + float(power_fc_sys_w)) * mu_f)
+        p_den = power_comp_w + power_fc_sys_w
+        if p_den <= 0.0:
+            eta_fcsys = 0.0
+        else:
+            eta_fcsys = float(eta_cell * power_fc_sys_w / p_den * mu_f)
 
-        mdot_h2 = float(1.05e-8 * (power_comp_w + float(power_fc_sys_w)) / volt_cell)
+        mdot_h2 = float(1.05e-8 * p_den / volt_cell)
 
         if verbose:
             logger.info(f"Stack prop output power: {power_fc_sys_w/1000:,.0f} kW, Pcomp: {power_comp_w/1000:,.1f} kW")
             logger.info(f"Cell efficiency: {eta_cell:,.3f}, Output efficiency: {eta_fcsys:,.3f}")
             logger.info(f"mdot_h2: {mdot_h2*1000:,.2f} g/s")
 
-        return FuelCellSystemSizingResult(
+        result = FuelCellSystemSizingResult(
             m_sys_kg=float(m_sys),
             m_stacks_kg=float(m_stacks),
             m_comp_kg=float(m_comp),
@@ -1486,12 +1629,20 @@ class FuelCellSystemModel:
             mdot_h2_kgps=float(mdot_h2),
             power_comp_w=float(power_comp_w),
             q_all_w=float(q_all),
-            v_cr_mps=float(v_cr.to("meter / second").magnitude),
+            v_cr_mps=float(v_cr_mps),
             dim_stack_m=(float(dim_stack[0]), float(dim_stack[1]), float(dim_stack[2])),
             dim_hx_m=(float(dim_hx[0]), float(dim_hx[1]), float(dim_hx[2])),
             res_stack=(float(res_stack[0]), float(res_stack[1])),
             figs=figs,
         )
+
+        if not make_fig:
+            self._nacelle_cache[cache_key] = result
+            # Keep cache bounded without adding another dependency.
+            if len(self._nacelle_cache) > 4096:
+                self._nacelle_cache.clear()
+
+        return result
 
 
 class PhasePowerSolver:
@@ -1524,14 +1675,14 @@ class PhasePowerSolver:
     ) -> PhasePowerResult:
         """Fixed-point iteration for total electrical power (excluding cooling)."""
 
-        p_total = Q_(float(initial_total_power_w), "watt")
+        p_total = float(initial_total_power_w)
 
         for inner_iter in range(1, self._cfg.solver.max_inner_iter + 1):
             # New standard input: kW/kg
-            p_shaft = (Q_(float(mtom_kg), "kilogram") * Q_(float(p_w_kw_per_kg), "kilowatt / kilogram")).to("watt")
+            p_shaft = float(mtom_kg) * float(p_w_kw_per_kg) * 1000.0
 
-            split = self._powertrain.split_shaft_power(float(p_shaft.to("watt").magnitude), psi)
-            p_bus_required = Q_(float(split.p_bus_required_w), "watt")
+            split = self._powertrain.split_shaft_power(float(p_shaft), psi)
+            p_bus_required = float(split.p_bus_required_w)
 
             # Fuel-cell net electrical output used for per-nacelle sizing.
             #
@@ -1540,7 +1691,7 @@ class PhasePowerSolver:
             # - when battery discharges (p_battery > 0), subtract that contribution.
             # - when battery charges (p_battery < 0), charging demand is already represented
             #   in p_total and must be supplied by FC.
-            p_fc_sys_total = float((p_total - Q_(max(float(split.p_battery_w), 0.0), "watt")).to("watt").magnitude)
+            p_fc_sys_total = float(p_total - max(float(split.p_battery_w), 0.0))
 
             # Guardrail: ensure sizing power stays positive.
             if p_fc_sys_total <= 0.0:
@@ -1555,32 +1706,29 @@ class PhasePowerSolver:
                 oversizing=oversizing,
                 comp_bool=True,
                 make_fig=False,
-                verbose=True,
+                verbose=logger.isEnabledFor(logging.DEBUG),
             )
 
-            p_comp_total = Q_(nacelle.power_comp_w * self._cfg.fuel_cell_arch.n_stacks_parallel, "watt")
-            heat_rejected = Q_(self._cfg.fuel_cell_arch.n_stacks_parallel * nacelle.q_all_w, "watt")
-            p_cooling = Q_(
-                self._cooling.power_required_w(float(heat_rejected.to("kilowatt").magnitude)),
-                "watt",
-            )
+            p_comp_total = float(nacelle.power_comp_w * self._cfg.fuel_cell_arch.n_stacks_parallel)
+            heat_rejected_w = float(self._cfg.fuel_cell_arch.n_stacks_parallel * nacelle.q_all_w)
+            p_cooling = float(self._cooling.power_required_w(heat_rejected_w / 1000.0))
 
             # Per user requirement, total power excludes cooling load.
             # Cooling is still computed and reported via p_cooling_w.
-            p_total_new = p_bus_required + p_comp_total
+            p_total_new = float(p_bus_required + p_comp_total)
 
-            if abs(float((p_total_new - p_total).to("watt").magnitude)) <= self._cfg.solver.power_tol_w:
+            if abs(float(p_total_new - p_total)) <= self._cfg.solver.power_tol_w:
                 return PhasePowerResult(
                     name=name,
                     mtom_kg=float(mtom_kg),
-                    p_shaft_w=float(p_shaft.to("watt").magnitude),
+                    p_shaft_w=float(p_shaft),
                     p_fuelcell_w=float(split.p_fuelcell_w),
                     p_battery_w=float(split.p_battery_w),
-                    p_bus_required_w=float(p_bus_required.to("watt").magnitude),
-                    p_comp_w=float(p_comp_total.to("watt").magnitude),
-                    p_cooling_w=float(p_cooling.to("watt").magnitude),
-                    p_total_w=float(p_total_new.to("watt").magnitude),
-                    heat_rejected_kw=float(heat_rejected.to("kilowatt").magnitude),
+                    p_bus_required_w=float(p_bus_required),
+                    p_comp_w=float(p_comp_total),
+                    p_cooling_w=float(p_cooling),
+                    p_total_w=float(p_total_new),
+                    heat_rejected_kw=float(heat_rejected_w / 1000.0),
                     mdot_h2_kgps=float(nacelle.mdot_h2_kgps * self._cfg.fuel_cell_arch.n_stacks_parallel),
                     nacelle=nacelle,
                 )
@@ -2253,7 +2401,11 @@ class HybridFuelCellAircraftDesign:
             cruise_mach=cfg.flight.mach_cr,
             cfg=cfg.cooling,
         )
-        self._fc_model = FuelCellSystemModel(cfg.fuel_cell_arch, comp_stl_path=self._comp_stl_path)
+        self._fc_model = FuelCellSystemModel(
+            cfg.fuel_cell_arch,
+            comp_stl_path=self._comp_stl_path,
+            comp_mass_mode=cfg.solver.compressor_mass_mode,
+        )
         self._phase_solver = PhasePowerSolver(
             config=cfg,
             powertrain=self._powertrain,
@@ -3743,7 +3895,11 @@ class OutputWriter:
         """Generate PEMFC polarization figure once (expensive)."""
 
         try:
-            fc = FuelCellSystemModel(self._cfg.fuel_cell_arch, comp_stl_path=out_dir / "media" / "comp.stl")
+            fc = FuelCellSystemModel(
+                self._cfg.fuel_cell_arch,
+                comp_stl_path=out_dir / "media" / "comp.stl",
+                comp_mass_mode=self._cfg.solver.compressor_mass_mode,
+            )
             res = fc.size_nacelle(
                 power_fc_sys_w=nacelle_power_w,
                 flight_point=FlightPoint(self._cfg.flight.h_cr_m, self._cfg.flight.mach_cr),
