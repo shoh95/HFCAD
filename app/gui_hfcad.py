@@ -3273,6 +3273,77 @@ class HFCADGui(QMainWindow):
     def _float_equal(a: float, b: float, tol: float = 1e-12) -> bool:
         return abs(a - b) <= tol
 
+    def _linked_sweep_group_rows(self, group_name: str) -> List[int]:
+        normalized_group = group_name.strip()
+        if not normalized_group:
+            return []
+        return [idx for idx, sp in enumerate(self.sweep_parameters) if sp.link_group.strip() == normalized_group]
+
+    def _sync_linked_group_from_reference_row(self, reference_row: int) -> int:
+        if reference_row < 0 or reference_row >= len(self.sweep_parameters):
+            return 0
+
+        reference = self.sweep_parameters[reference_row]
+        group_rows = self._linked_sweep_group_rows(reference.link_group)
+        if len(group_rows) < 2:
+            return 0
+
+        updated = 0
+        for row in group_rows:
+            if row == reference_row:
+                continue
+            target = self.sweep_parameters[row]
+            changed = False
+            if not self._float_equal(target.min_value, reference.min_value):
+                target.min_value = reference.min_value
+                changed = True
+            if not self._float_equal(target.max_value, reference.max_value):
+                target.max_value = reference.max_value
+                changed = True
+            if not self._float_equal(target.delta, reference.delta):
+                target.delta = reference.delta
+                changed = True
+            if target.include_in_name != reference.include_in_name:
+                target.include_in_name = reference.include_in_name
+                changed = True
+            if target.abbreviation != reference.abbreviation:
+                target.abbreviation = reference.abbreviation
+                changed = True
+            if changed:
+                updated += 1
+        return updated
+
+    def _enforce_linked_sweep_sync(self) -> List[str]:
+        """Ensure actively linked sweep parameters share one sweep/case-name definition."""
+        notes: List[str] = []
+        grouped_rows: Dict[str, List[int]] = {}
+        for idx, sp in enumerate(self.sweep_parameters):
+            group_name = sp.link_group.strip()
+            if group_name:
+                grouped_rows.setdefault(group_name, []).append(idx)
+
+        for group_name, rows in grouped_rows.items():
+            if len(rows) < 2:
+                continue
+
+            reference_row = rows[0]
+            cruise_row = next(
+                (row for row in rows if self.sweep_parameters[row].name == CRUISE_ALT_SWEEP_PARAM),
+                None,
+            )
+            if cruise_row is not None:
+                reference_row = cruise_row
+
+            updated = self._sync_linked_group_from_reference_row(reference_row)
+            if updated:
+                reference_name = self.sweep_parameters[reference_row].name
+                notes.append(
+                    f"link_group='{group_name}': synchronized min/max/delta/include/abbrev from "
+                    f"{reference_name} to {updated} linked parameter(s)."
+                )
+
+        return notes
+
     def _enforce_cruise_altitude_sweep_sync(self) -> List[str]:
         """Mirror climb/turn altitude sweeps from cruise altitude when cruise sweep exists."""
         notes: List[str] = []
@@ -3396,6 +3467,7 @@ class HFCADGui(QMainWindow):
         for row in rows:
             self.sweep_parameters[row].link_group = link_group
 
+        synced_count = self._sync_linked_group_from_reference_row(rows[0])
         self.sweep_link_edit.setText(link_group)
         self._commit_parameter_change(
             enforce_sync=True,
@@ -3404,7 +3476,10 @@ class HFCADGui(QMainWindow):
             refresh_constant_table=True,
             refresh_const_editor=True,
         )
-        self._log(f"[sweep-link] auto assigned {link_group} to {len(rows)} parameter(s)")
+        self._log(
+            f"[sweep-link] auto assigned {link_group} to {len(rows)} parameter(s), "
+            f"synchronized linked settings for {synced_count} parameter(s)"
+        )
 
     def on_set_sweep_link_group(self) -> None:
         link_group = self.sweep_link_edit.text().strip()
@@ -3417,6 +3492,7 @@ class HFCADGui(QMainWindow):
             return
         for row in rows:
             self.sweep_parameters[row].link_group = link_group
+        synced_count = self._sync_linked_group_from_reference_row(rows[0])
         self._commit_parameter_change(
             enforce_sync=True,
             log_sync_notes=True,
@@ -3424,7 +3500,10 @@ class HFCADGui(QMainWindow):
             refresh_constant_table=True,
             refresh_const_editor=True,
         )
-        self._log(f"[sweep-link] set link_group={link_group} for {len(rows)} parameter(s)")
+        self._log(
+            f"[sweep-link] set link_group={link_group} for {len(rows)} parameter(s), "
+            f"synchronized linked settings for {synced_count} parameter(s)"
+        )
 
     def on_clear_sweep_link_group(self) -> None:
         rows = self._selected_sweep_rows()
@@ -3498,6 +3577,10 @@ class HFCADGui(QMainWindow):
             self._refresh_sweep_table()
             return
 
+        synced_count = 0
+        if col in {1, 2, 3, 4, 5}:
+            synced_count = self._sync_linked_group_from_reference_row(row)
+
         self._commit_parameter_change(
             enforce_sync=True,
             log_sync_notes=True,
@@ -3505,6 +3588,10 @@ class HFCADGui(QMainWindow):
             refresh_constant_table=True,
             refresh_const_editor=True,
         )
+        if synced_count > 0:
+            self._log(
+                f"[sweep-link] {sp.name}: propagated linked settings to {synced_count} linked parameter(s)."
+            )
 
     def on_sweep_table_include_changed(self, param_name: str, value_text: str) -> None:
         if self._updating_sweep_table:
@@ -3526,6 +3613,8 @@ class HFCADGui(QMainWindow):
         if not updated:
             return
 
+        source_row = next((i for i, sp in enumerate(self.sweep_parameters) if sp.name == param_name), -1)
+        synced_count = self._sync_linked_group_from_reference_row(source_row)
         self._commit_parameter_change(
             enforce_sync=True,
             log_sync_notes=True,
@@ -3533,6 +3622,10 @@ class HFCADGui(QMainWindow):
             refresh_constant_table=True,
             refresh_const_editor=True,
         )
+        if synced_count > 0:
+            self._log(
+                f"[sweep-link] {param_name}: propagated linked settings to {synced_count} linked parameter(s)."
+            )
 
     def _refresh_sweep_table(self) -> None:
         current_row = self.sweep_table.currentRow()
@@ -3789,6 +3882,7 @@ class HFCADGui(QMainWindow):
         sync_notes: List[str] = []
         if enforce_sync:
             sync_notes = self._enforce_cruise_altitude_sweep_sync()
+            sync_notes.extend(self._enforce_linked_sweep_sync())
         self._refresh_parameter_views(
             refresh_loaded_params=refresh_loaded_params,
             refresh_parameter_selectors=refresh_parameter_selectors,
