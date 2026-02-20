@@ -9,6 +9,7 @@ import itertools
 import json
 import math
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -57,6 +58,7 @@ try:
     ALIGN_CENTER = Qt.AlignCenter
     KEEP_ASPECT_RATIO = Qt.KeepAspectRatio
     SMOOTH_TRANSFORMATION = Qt.SmoothTransformation
+    ITEM_IS_EDITABLE = Qt.ItemIsEditable
     MESSAGEBOX_YES = QMessageBox.Yes
     MESSAGEBOX_NO = QMessageBox.No
 
@@ -102,6 +104,7 @@ except ImportError:
     ALIGN_CENTER = Qt.AlignmentFlag.AlignCenter
     KEEP_ASPECT_RATIO = Qt.AspectRatioMode.KeepAspectRatio
     SMOOTH_TRANSFORMATION = Qt.TransformationMode.SmoothTransformation
+    ITEM_IS_EDITABLE = Qt.ItemFlag.ItemIsEditable
     MESSAGEBOX_YES = QMessageBox.StandardButton.Yes
     MESSAGEBOX_NO = QMessageBox.StandardButton.No
 
@@ -113,6 +116,39 @@ CASE_NAME_SAFE = re.compile(r"[^A-Za-z0-9_.-]+")
 LOG_SUMMARY_KEY = "__summary__"
 OUTPUT_PREVIEW_TEXT = 0
 OUTPUT_PREVIEW_IMAGE = 1
+CRUISE_ALT_SWEEP_PARAM = "constraint_brief.cruisealt_m"
+CLIMB_ALT_SWEEP_PARAM = "constraint_brief.climbalt_m"
+TURN_ALT_SWEEP_PARAM = "constraint_brief.turnalt_m"
+SYNCED_ALT_SWEEP_PARAMS = (CLIMB_ALT_SWEEP_PARAM, TURN_ALT_SWEEP_PARAM)
+CRUISE_ALT_SYNC_LINK_GROUP = "auto_cruisealt"
+BOOL_CONFIG_PARAMS = {
+    "constraint_sizing.enable",
+    "constraint_sizing.scan_quiet",
+    "constraint_sizing.use_combined_for_phases",
+    "constraint_sizing.ws_auto_widen_enable",
+    "constraint_sizing.write_trade_csv",
+    "fuselage.legacy_kc_overwrite_bug",
+    "solver.initial_bracket_probe_enable",
+    "solver.newton_use_bracketing",
+    "tail.enable",
+    "tail.main_wing_location",
+}
+ENUM_CONFIG_OPTIONS: Dict[str, Tuple[str, ...]] = {
+    "constraint_sizing.selection": ("min_combined_pw", "min_mtom"),
+    "constraint_sizing.takeoff_constraint": ("take-off", "climb", "cruise", "turn", "servceil", "combined"),
+    "constraint_sizing.climb_constraint": ("take-off", "climb", "cruise", "turn", "servceil", "combined"),
+    "constraint_sizing.cruise_constraint": ("take-off", "climb", "cruise", "turn", "servceil", "combined"),
+    "constraint_sizing.propulsion_type": ("electric", "piston", "turboprop", "jet", "turbofan"),
+    # beta accepts booleans and numeric text in main.py; include common fixed value.
+    "fuel_cell_op.beta": ("True", "False", "1.05"),
+    # main.py accepts these aliases in _normalize_comp_mass_mode.
+    "solver.compressor_mass_mode": ("surrogate", "fast", "approx", "regression", "cadquery", "cad", "full"),
+    # 'legacy'/'picard' are fixed-point aliases in main.py.
+    "solver.mtom_solver": ("newton", "fixed_point", "legacy", "picard"),
+    "tail.wingpos": ("rand", "fwd", "aft"),
+    # main.py accepts 'to_climb_only' and legacy alias 'climb_only'.
+    "weights.battery_sizing_mode": ("fixed_time", "TO_Climb_only", "to_climb_only", "climb_only"),
+}
 
 try:
     from openpyxl import Workbook
@@ -197,6 +233,15 @@ def fmt_float_for_case(value: float) -> str:
         return str(int(round(value)))
     s = f"{value:.8f}".rstrip("0").rstrip(".")
     return s if s else "0"
+
+
+def parse_bool_text(value: str) -> Optional[bool]:
+    normalized = value.strip().lower()
+    if normalized in {"yes", "y", "true", "t", "1", "on"}:
+        return True
+    if normalized in {"no", "n", "false", "f", "0", "off"}:
+        return False
+    return None
 
 
 def build_series(min_value: float, max_value: float, delta: float) -> List[float]:
@@ -443,6 +488,8 @@ class HFCADGui(QMainWindow):
         self._collected_case_rows: List[Dict[str, float | int | str]] = []
         self._collected_numeric_columns: List[str] = []
         self._last_exported_excel: Optional[Path] = None
+        self._updating_sweep_table = False
+        self._updating_const_table = False
 
         self._build_ui()
         self._build_menu()
@@ -569,10 +616,10 @@ class HFCADGui(QMainWindow):
                 cp for cp in self.constant_parameters if cp.name in valid_params and cp.name not in sweep_names
             ]
 
+        self._enforce_cruise_altitude_sweep_sync()
         self._refresh_sweep_table()
         self._refresh_constant_table()
-        self._update_diff_summary()
-        self.on_sweep_parameter_changed()
+        self._on_parameters_changed(refresh_sweep_editor=True, refresh_const_editor=True)
 
     def _build_ui(self) -> None:
         central = QWidget()
@@ -758,13 +805,17 @@ class HFCADGui(QMainWindow):
 
         self.const_param_combo = NoWheelComboBox()
         self.const_value_edit = QLineEdit()
+        self.const_value_combo = NoWheelComboBox()
+        self.const_value_stack = QStackedWidget()
+        self.const_value_stack.addWidget(self.const_value_edit)
+        self.const_value_stack.addWidget(self.const_value_combo)
         self.const_add_btn = QPushButton("Add Constant Parameter")
         self.const_remove_btn = QPushButton("Remove Selected")
         self.const_add_all_btn = QPushButton("Add All Non-Sweep")
         const_form.addWidget(QLabel("Parameter"), 0, 0)
         const_form.addWidget(self.const_param_combo, 0, 1)
         const_form.addWidget(QLabel("Value"), 0, 2)
-        const_form.addWidget(self.const_value_edit, 0, 3)
+        const_form.addWidget(self.const_value_stack, 0, 3)
         const_form.addWidget(self.const_add_btn, 0, 4)
         const_form.addWidget(self.const_remove_btn, 0, 5)
         const_form.addWidget(self.const_add_all_btn, 0, 6)
@@ -795,6 +846,12 @@ class HFCADGui(QMainWindow):
         self.timeout_spin.setSuffix(" s")
 
         self.success_artifact_edit = QLineEdit("ConvergedData.txt")
+        self.strict_ini_check = QCheckBox("Strict INI standards")
+        self.strict_ini_check.setChecked(False)
+        self.strict_ini_check.setToolTip(
+            "If enabled, non-standard enum/bool values fail generated INI validation."
+        )
+        self.update_params_btn = QPushButton("Update Params")
         self.make_input_btn = QPushButton("Make Input Files")
         self.execute_btn = QPushButton("Execute Cases")
         self.stop_btn = QPushButton("Stop Run")
@@ -806,11 +863,13 @@ class HFCADGui(QMainWindow):
         execute_layout.addWidget(self.jobs_spin, 0, 3)
         execute_layout.addWidget(QLabel("Timeout per case"), 0, 4)
         execute_layout.addWidget(self.timeout_spin, 0, 5)
+        execute_layout.addWidget(self.strict_ini_check, 0, 6, 1, 2)
         execute_layout.addWidget(QLabel("Success artifact"), 1, 0)
         execute_layout.addWidget(self.success_artifact_edit, 1, 1, 1, 3)
-        execute_layout.addWidget(self.make_input_btn, 1, 4)
-        execute_layout.addWidget(self.execute_btn, 1, 5)
-        execute_layout.addWidget(self.stop_btn, 1, 6)
+        execute_layout.addWidget(self.update_params_btn, 1, 4)
+        execute_layout.addWidget(self.make_input_btn, 1, 5)
+        execute_layout.addWidget(self.execute_btn, 1, 6)
+        execute_layout.addWidget(self.stop_btn, 1, 7)
         generator_layout.addWidget(execute_group)
 
         diff_group = QGroupBox("Major Differences Between Cases")
@@ -943,6 +1002,7 @@ class HFCADGui(QMainWindow):
         self.const_add_btn.clicked.connect(self.on_add_constant_parameter)
         self.const_remove_btn.clicked.connect(self.on_remove_constant_parameter)
         self.const_add_all_btn.clicked.connect(self.on_add_all_constants_except_sweep)
+        self.update_params_btn.clicked.connect(self.on_update_params_from_tables)
         self.make_input_btn.clicked.connect(self.on_make_input_files)
         self.execute_btn.clicked.connect(self.on_execute_cases)
         self.stop_btn.clicked.connect(self.on_stop_run)
@@ -955,6 +1015,10 @@ class HFCADGui(QMainWindow):
         self.output_plot_btn.clicked.connect(self.on_draw_collected_plot)
         self.output_hold_param_combo.currentIndexChanged.connect(self.on_output_hold_parameter_changed)
         self.sweep_param_combo.currentTextChanged.connect(self.on_sweep_parameter_changed)
+        self.const_param_combo.currentTextChanged.connect(self.on_const_parameter_changed)
+        self.const_value_combo.currentTextChanged.connect(self.const_value_edit.setText)
+        self.sweep_table.itemChanged.connect(self.on_sweep_table_item_changed)
+        self.const_table.itemChanged.connect(self.on_const_table_item_changed)
         self.mode_combo.currentTextChanged.connect(self.on_mode_changed)
         self.add_loaded_to_sweep_btn.clicked.connect(self.on_add_loaded_selection_to_sweep)
         self.add_loaded_to_constant_btn.clicked.connect(self.on_add_loaded_selection_to_constants)
@@ -994,6 +1058,7 @@ class HFCADGui(QMainWindow):
         self.python_edit.setText(sys.executable)
         self.main_script_edit.setText(str(default_main))
         self.case_prefix_edit.setText("")
+        self.strict_ini_check.setChecked(False)
 
         self.on_load_parameters()
         self.on_mode_changed()
@@ -1066,7 +1131,7 @@ class HFCADGui(QMainWindow):
             for name, value in self.loaded_parameter_items
         ]
         self._refresh_constant_table()
-        self._update_diff_summary()
+        self._on_parameters_changed(refresh_const_editor=True)
 
         self._log(
             f"[import-case] Imported {len(self.loaded_parameter_items)} parameters from {case_path} "
@@ -1146,9 +1211,10 @@ class HFCADGui(QMainWindow):
                 non_numeric_varied += 1
                 self.constant_parameters.append(ConstantParameter(name=key, value=unique_values[0]))
 
+        self._enforce_cruise_altitude_sweep_sync()
         self._refresh_sweep_table()
         self._refresh_constant_table()
-        self._update_diff_summary()
+        self._on_parameters_changed(refresh_sweep_editor=True, refresh_const_editor=True)
         self._log(
             f"[import-folder] folder={folder_path}, files={len(case_dicts)}, "
             f"sweep_params={len(self.sweep_parameters)}, constants={len(self.constant_parameters)}, "
@@ -2053,11 +2119,16 @@ class HFCADGui(QMainWindow):
             )
             added += 1
 
+        sync_notes = self._enforce_cruise_altitude_sweep_sync()
         self._refresh_sweep_table()
+        self._refresh_constant_table()
+        self._on_parameters_changed(refresh_const_editor=True)
         self._log(
             f"[loaded->sweep] added={added}, skipped_existing={skipped_existing}, "
             f"skipped_nonnumeric={skipped_nonnumeric}"
         )
+        for note in sync_notes:
+            self._log(f"[sweep-sync] {note}")
 
     def on_add_loaded_selection_to_constants(self) -> None:
         selected = self._selected_loaded_items()
@@ -2080,6 +2151,7 @@ class HFCADGui(QMainWindow):
             added_or_updated += 1
 
         self._refresh_constant_table()
+        self._on_parameters_changed(refresh_const_editor=True)
         self._log(f"[loaded->constants] added_or_updated={added_or_updated}, skipped_sweep={skipped_sweep}")
 
     def on_add_sweep_parameter(self) -> None:
@@ -2122,13 +2194,89 @@ class HFCADGui(QMainWindow):
             )
         )
 
+        sync_notes = self._enforce_cruise_altitude_sweep_sync()
         self._refresh_sweep_table()
+        self._refresh_constant_table()
         self.sweep_abbrev_edit.setText(self._default_abbreviation(param))
+        self._on_parameters_changed(refresh_const_editor=True)
+        for note in sync_notes:
+            self._log(f"[sweep-sync] {note}")
 
     def on_sweep_parameter_changed(self) -> None:
         param = self.sweep_param_combo.currentText().strip()
         if param:
             self.sweep_abbrev_edit.setText(self._default_abbreviation(param))
+
+    @staticmethod
+    def _float_equal(a: float, b: float, tol: float = 1e-12) -> bool:
+        return abs(a - b) <= tol
+
+    def _enforce_cruise_altitude_sweep_sync(self) -> List[str]:
+        """Mirror climb/turn altitude sweeps from cruise altitude when cruise sweep exists."""
+        notes: List[str] = []
+        cruise = next((sp for sp in self.sweep_parameters if sp.name == CRUISE_ALT_SWEEP_PARAM), None)
+        if cruise is None:
+            return notes
+
+        sync_link_group = cruise.link_group.strip() or CRUISE_ALT_SYNC_LINK_GROUP
+        if cruise.link_group != sync_link_group:
+            cruise.link_group = sync_link_group
+            notes.append(
+                f"{CRUISE_ALT_SWEEP_PARAM}: set link_group='{sync_link_group}' for synchronized altitude sweep."
+            )
+
+        valid_names = set(self.parameter_options)
+        for dep_name in SYNCED_ALT_SWEEP_PARAMS:
+            if valid_names and dep_name not in valid_names:
+                continue
+            dep = next((sp for sp in self.sweep_parameters if sp.name == dep_name), None)
+            if dep is None:
+                self.sweep_parameters.append(
+                    SweepParameter(
+                        name=dep_name,
+                        min_value=cruise.min_value,
+                        max_value=cruise.max_value,
+                        delta=cruise.delta,
+                        include_in_name=False,
+                        abbreviation=self._default_abbreviation(dep_name),
+                        link_group=sync_link_group,
+                    )
+                )
+                notes.append(f"{dep_name}: added and synchronized to {CRUISE_ALT_SWEEP_PARAM}.")
+                continue
+
+            dep_changed = False
+            if not self._float_equal(dep.min_value, cruise.min_value):
+                dep.min_value = cruise.min_value
+                dep_changed = True
+            if not self._float_equal(dep.max_value, cruise.max_value):
+                dep.max_value = cruise.max_value
+                dep_changed = True
+            if not self._float_equal(dep.delta, cruise.delta):
+                dep.delta = cruise.delta
+                dep_changed = True
+            if dep.link_group != sync_link_group:
+                dep.link_group = sync_link_group
+                dep_changed = True
+            if dep.include_in_name:
+                dep.include_in_name = False
+                dep_changed = True
+
+            if dep_changed:
+                notes.append(f"{dep_name}: updated to match {CRUISE_ALT_SWEEP_PARAM}.")
+
+        removed_constants = [cp.name for cp in self.constant_parameters if cp.name in SYNCED_ALT_SWEEP_PARAMS]
+        if removed_constants:
+            self.constant_parameters = [
+                cp for cp in self.constant_parameters if cp.name not in SYNCED_ALT_SWEEP_PARAMS
+            ]
+            removed_preview = ", ".join(sorted(removed_constants))
+            notes.append(
+                f"removed conflicting constant override(s): {removed_preview} "
+                f"(now synchronized with {CRUISE_ALT_SWEEP_PARAM})."
+            )
+
+        return notes
 
     def _selected_sweep_rows(self) -> List[int]:
         rows = sorted({idx.row() for idx in self.sweep_table.selectionModel().selectedRows()})
@@ -2138,6 +2286,14 @@ class HFCADGui(QMainWindow):
         if 0 <= row < len(self.sweep_parameters):
             return [row]
         return []
+
+    @staticmethod
+    def _table_item_text(table: QTableWidget, row: int, col: int) -> str:
+        widget = table.cellWidget(row, col)
+        if isinstance(widget, QComboBox):
+            return widget.currentText().strip()
+        item = table.item(row, col)
+        return item.text().strip() if item is not None else ""
 
     def _next_auto_link_group(self) -> str:
         max_group_num = 0
@@ -2159,9 +2315,13 @@ class HFCADGui(QMainWindow):
             self.sweep_parameters[row].link_group = link_group
 
         self.sweep_link_edit.setText(link_group)
+        sync_notes = self._enforce_cruise_altitude_sweep_sync()
         self._refresh_sweep_table()
-        self._update_diff_summary()
+        self._refresh_constant_table()
+        self._on_parameters_changed(refresh_const_editor=True)
         self._log(f"[sweep-link] auto assigned {link_group} to {len(rows)} parameter(s)")
+        for note in sync_notes:
+            self._log(f"[sweep-sync] {note}")
 
     def on_set_sweep_link_group(self) -> None:
         link_group = self.sweep_link_edit.text().strip()
@@ -2174,9 +2334,13 @@ class HFCADGui(QMainWindow):
             return
         for row in rows:
             self.sweep_parameters[row].link_group = link_group
+        sync_notes = self._enforce_cruise_altitude_sweep_sync()
         self._refresh_sweep_table()
-        self._update_diff_summary()
+        self._refresh_constant_table()
+        self._on_parameters_changed(refresh_const_editor=True)
         self._log(f"[sweep-link] set link_group={link_group} for {len(rows)} parameter(s)")
+        for note in sync_notes:
+            self._log(f"[sweep-sync] {note}")
 
     def on_clear_sweep_link_group(self) -> None:
         rows = self._selected_sweep_rows()
@@ -2188,9 +2352,13 @@ class HFCADGui(QMainWindow):
             if self.sweep_parameters[row].link_group:
                 self.sweep_parameters[row].link_group = ""
                 cleared += 1
+        sync_notes = self._enforce_cruise_altitude_sweep_sync()
         self._refresh_sweep_table()
-        self._update_diff_summary()
+        self._refresh_constant_table()
+        self._on_parameters_changed(refresh_const_editor=True)
         self._log(f"[sweep-link] cleared link group for {cleared} parameter(s)")
+        for note in sync_notes:
+            self._log(f"[sweep-sync] {note}")
 
     def on_remove_sweep_parameter(self) -> None:
         row = self.sweep_table.currentRow()
@@ -2198,23 +2366,178 @@ class HFCADGui(QMainWindow):
             self._show_warning("Select a sweep parameter row to remove.")
             return
         del self.sweep_parameters[row]
+        sync_notes = self._enforce_cruise_altitude_sweep_sync()
         self._refresh_sweep_table()
+        self._refresh_constant_table()
+        self._on_parameters_changed(refresh_const_editor=True)
+        for note in sync_notes:
+            self._log(f"[sweep-sync] {note}")
+
+    def on_sweep_table_item_changed(self, item: QTableWidgetItem) -> None:
+        if self._updating_sweep_table:
+            return
+
+        row = item.row()
+        col = item.column()
+        if row < 0 or row >= len(self.sweep_parameters):
+            return
+
+        sp = self.sweep_parameters[row]
+        value_text = item.text().strip()
+
+        try:
+            if col == 1:
+                sp.min_value = float(value_text)
+            elif col == 2:
+                sp.max_value = float(value_text)
+            elif col == 3:
+                delta = float(value_text)
+                if delta <= 0:
+                    raise ValueError("delta must be greater than zero")
+                sp.delta = delta
+            elif col == 4:
+                include = parse_bool_text(value_text)
+                if include is None:
+                    raise ValueError("Use Yes/No (or True/False) for In Case Name")
+                sp.include_in_name = include
+            elif col == 5:
+                sp.abbreviation = value_text
+            elif col == 6:
+                sp.link_group = value_text
+            else:
+                self._refresh_sweep_table()
+                return
+        except ValueError as exc:
+            self._show_warning(f"Invalid sweep value for {sp.name}: {exc}")
+            self._refresh_sweep_table()
+            return
+
+        sync_notes = self._enforce_cruise_altitude_sweep_sync()
+        self._refresh_sweep_table()
+        self._refresh_constant_table()
+        self._on_parameters_changed(refresh_const_editor=True)
+        for note in sync_notes:
+            self._log(f"[sweep-sync] {note}")
 
     def _refresh_sweep_table(self) -> None:
-        self.sweep_table.setRowCount(len(self.sweep_parameters))
-        for i, sp in enumerate(self.sweep_parameters):
-            self.sweep_table.setItem(i, 0, QTableWidgetItem(sp.name))
-            self.sweep_table.setItem(i, 1, QTableWidgetItem(fmt_float_for_ini(sp.min_value)))
-            self.sweep_table.setItem(i, 2, QTableWidgetItem(fmt_float_for_ini(sp.max_value)))
-            self.sweep_table.setItem(i, 3, QTableWidgetItem(fmt_float_for_ini(sp.delta)))
-            self.sweep_table.setItem(i, 4, QTableWidgetItem("Yes" if sp.include_in_name else "No"))
-            self.sweep_table.setItem(i, 5, QTableWidgetItem(sp.abbreviation))
-            self.sweep_table.setItem(i, 6, QTableWidgetItem(sp.link_group))
+        current_row = self.sweep_table.currentRow()
+        current_col = self.sweep_table.currentColumn()
+        self._updating_sweep_table = True
+        self.sweep_table.blockSignals(True)
+        try:
+            self.sweep_table.setRowCount(len(self.sweep_parameters))
+            for i, sp in enumerate(self.sweep_parameters):
+                name_item = QTableWidgetItem(sp.name)
+                name_item.setFlags(name_item.flags() & ~ITEM_IS_EDITABLE)
+                self.sweep_table.setItem(i, 0, name_item)
+                self.sweep_table.setItem(i, 1, QTableWidgetItem(fmt_float_for_ini(sp.min_value)))
+                self.sweep_table.setItem(i, 2, QTableWidgetItem(fmt_float_for_ini(sp.max_value)))
+                self.sweep_table.setItem(i, 3, QTableWidgetItem(fmt_float_for_ini(sp.delta)))
+                self.sweep_table.setItem(i, 4, QTableWidgetItem("Yes" if sp.include_in_name else "No"))
+                self.sweep_table.setItem(i, 5, QTableWidgetItem(sp.abbreviation))
+                self.sweep_table.setItem(i, 6, QTableWidgetItem(sp.link_group))
+        finally:
+            self.sweep_table.blockSignals(False)
+            self._updating_sweep_table = False
+
+        if 0 <= current_row < self.sweep_table.rowCount():
+            target_col = current_col if 0 <= current_col < self.sweep_table.columnCount() else 0
+            self.sweep_table.setCurrentCell(current_row, target_col)
         self._refresh_plot_metric_combos()
+
+    def _loaded_value_for_parameter(self, param_name: str) -> str:
+        for name, value in self.loaded_parameter_items:
+            if name == param_name:
+                return value.strip()
+        return ""
+
+    def _existing_constant_value(self, param_name: str) -> str:
+        for cp in self.constant_parameters:
+            if cp.name == param_name:
+                return cp.value.strip()
+        return ""
+
+    def _normalize_choice_value(self, value: str, options: Sequence[str]) -> str:
+        text = value.strip()
+        if not text:
+            return ""
+
+        bool_value = parse_bool_text(text)
+        if bool_value is not None and "True" in options and "False" in options:
+            return "True" if bool_value else "False"
+
+        lowered = text.lower()
+        for opt in options:
+            if opt.lower() == lowered:
+                return opt
+        return text
+
+    def _parameter_value_options(self, param_name: str, current_value: str = "") -> List[str]:
+        options = list(ENUM_CONFIG_OPTIONS.get(param_name, ()))
+        if not options and (param_name in BOOL_CONFIG_PARAMS or parse_bool_text(current_value) is not None):
+            options = ["True", "False"]
+        if not options:
+            return []
+
+        normalized_current = self._normalize_choice_value(current_value, options)
+        if normalized_current and normalized_current not in options:
+            options.append(normalized_current)
+        return options
+
+    def _current_const_value_input(self) -> str:
+        if self.const_value_stack.currentWidget() is self.const_value_combo:
+            return self.const_value_combo.currentText().strip()
+        return self.const_value_edit.text().strip()
+
+    def on_const_parameter_changed(self) -> None:
+        param = self.const_param_combo.currentText().strip()
+        if not param:
+            self.const_value_stack.setCurrentWidget(self.const_value_edit)
+            return
+
+        preferred = self._existing_constant_value(param)
+        if not preferred:
+            preferred = self._loaded_value_for_parameter(param)
+        if not preferred:
+            preferred = self.const_value_edit.text().strip()
+
+        options = self._parameter_value_options(param, preferred)
+        if options:
+            target_value = self._normalize_choice_value(preferred, options)
+            self.const_value_combo.blockSignals(True)
+            self.const_value_combo.clear()
+            self.const_value_combo.addItems(options)
+            idx = self.const_value_combo.findText(target_value)
+            self.const_value_combo.setCurrentIndex(idx if idx >= 0 else 0)
+            self.const_value_combo.blockSignals(False)
+            self.const_value_edit.setText(self.const_value_combo.currentText().strip())
+            self.const_value_stack.setCurrentWidget(self.const_value_combo)
+            return
+
+        self.const_value_stack.setCurrentWidget(self.const_value_edit)
+        if preferred:
+            self.const_value_edit.setText(preferred)
+
+    def on_const_table_combo_value_changed(self, param_name: str, new_value: str) -> None:
+        if self._updating_const_table:
+            return
+
+        updated = False
+        for idx, cp in enumerate(self.constant_parameters):
+            if cp.name == param_name and cp.value != new_value:
+                self.constant_parameters[idx] = ConstantParameter(name=cp.name, value=new_value)
+                updated = True
+                break
+
+        if not updated:
+            return
+
+        refresh_editor = self.const_param_combo.currentText().strip() == param_name
+        self._on_parameters_changed(refresh_const_editor=refresh_editor)
 
     def on_add_constant_parameter(self) -> None:
         param = self.const_param_combo.currentText().strip()
-        value = self.const_value_edit.text().strip()
+        value = self._current_const_value_input()
         if not param:
             self._show_warning("Select a constant parameter.")
             return
@@ -2233,6 +2556,7 @@ class HFCADGui(QMainWindow):
             self.constant_parameters[idx] = ConstantParameter(name=param, value=value)
 
         self._refresh_constant_table()
+        self._on_parameters_changed(refresh_const_editor=True)
 
     def on_remove_constant_parameter(self) -> None:
         row = self.const_table.currentRow()
@@ -2241,6 +2565,195 @@ class HFCADGui(QMainWindow):
             return
         del self.constant_parameters[row]
         self._refresh_constant_table()
+        self._on_parameters_changed(refresh_const_editor=True)
+
+    def on_const_table_item_changed(self, item: QTableWidgetItem) -> None:
+        if self._updating_const_table:
+            return
+
+        row = item.row()
+        col = item.column()
+        if row < 0 or row >= len(self.constant_parameters):
+            return
+
+        if col != 1:
+            self._refresh_constant_table()
+            return
+
+        value = item.text().strip()
+        if value == "":
+            self._show_warning("Constant parameter value cannot be empty.")
+            self._refresh_constant_table()
+            return
+
+        param_name = self.constant_parameters[row].name
+        self.constant_parameters[row].value = value
+        self._refresh_constant_table()
+        refresh_editor = self.const_param_combo.currentText().strip() == param_name
+        self._on_parameters_changed(refresh_const_editor=refresh_editor)
+
+    def _on_parameters_changed(
+        self,
+        *,
+        refresh_sweep_editor: bool = False,
+        refresh_const_editor: bool = False,
+        clear_generated_cases: bool = True,
+    ) -> None:
+        if clear_generated_cases and self.generated_cases:
+            self.generated_cases = []
+            self._log(
+                "[params] parameter values changed; cleared generated-case cache. "
+                "Regenerate input files before execute."
+            )
+
+        self._update_diff_summary()
+        if refresh_sweep_editor:
+            self.on_sweep_parameter_changed()
+        if refresh_const_editor:
+            self.on_const_parameter_changed()
+
+    def on_update_params_from_tables(self, checked: bool = False, *, show_success: bool = True) -> bool:
+        del checked
+        self.sweep_table.clearFocus()
+        self.const_table.clearFocus()
+        QApplication.processEvents()
+
+        errors: List[str] = []
+        warnings: List[str] = []
+
+        updated_sweeps: List[SweepParameter] = []
+        sweep_pos: Dict[str, int] = {}
+        for row in range(self.sweep_table.rowCount()):
+            name = self._table_item_text(self.sweep_table, row, 0)
+            if not name:
+                warnings.append(f"Sweep row {row + 1}: empty parameter name row ignored.")
+                continue
+
+            min_text = self._table_item_text(self.sweep_table, row, 1)
+            max_text = self._table_item_text(self.sweep_table, row, 2)
+            delta_text = self._table_item_text(self.sweep_table, row, 3)
+            include_text = self._table_item_text(self.sweep_table, row, 4)
+            abbrev = self._table_item_text(self.sweep_table, row, 5)
+            link_group = self._table_item_text(self.sweep_table, row, 6)
+
+            try:
+                min_value = float(min_text)
+                max_value = float(max_text)
+                delta = float(delta_text)
+                if delta <= 0:
+                    raise ValueError("delta must be greater than zero")
+            except ValueError as exc:
+                errors.append(f"Sweep row {row + 1} ({name}): {exc}")
+                continue
+
+            include_flag = parse_bool_text(include_text)
+            if include_flag is None:
+                errors.append(
+                    f"Sweep row {row + 1} ({name}): invalid In Case Name value '{include_text}' "
+                    "(use Yes/No, True/False, 1/0)."
+                )
+                continue
+
+            if not abbrev:
+                abbrev = self._default_abbreviation(name)
+
+            sweep_item = SweepParameter(
+                name=name,
+                min_value=min_value,
+                max_value=max_value,
+                delta=delta,
+                include_in_name=include_flag,
+                abbreviation=abbrev,
+                link_group=link_group,
+            )
+            if name in sweep_pos:
+                updated_sweeps[sweep_pos[name]] = sweep_item
+                warnings.append(
+                    f"Sweep duplicate '{name}' detected; kept last occurrence (row {row + 1})."
+                )
+            else:
+                sweep_pos[name] = len(updated_sweeps)
+                updated_sweeps.append(sweep_item)
+
+        updated_constants: List[ConstantParameter] = []
+        const_pos: Dict[str, int] = {}
+        for row in range(self.const_table.rowCount()):
+            name = self._table_item_text(self.const_table, row, 0)
+            value = self._table_item_text(self.const_table, row, 1)
+            if not name:
+                warnings.append(f"Constant row {row + 1}: empty parameter name row ignored.")
+                continue
+            if value == "":
+                errors.append(f"Constant row {row + 1} ({name}): value cannot be empty.")
+                continue
+
+            const_item = ConstantParameter(name=name, value=value)
+            if name in const_pos:
+                updated_constants[const_pos[name]] = const_item
+                warnings.append(
+                    f"Constant duplicate '{name}' detected; kept last occurrence (row {row + 1})."
+                )
+            else:
+                const_pos[name] = len(updated_constants)
+                updated_constants.append(const_item)
+
+        if errors:
+            error_preview = "\n".join(f"- {msg}" for msg in errors[:8])
+            if len(errors) > 8:
+                error_preview += f"\n- ... and {len(errors) - 8} more"
+            self._show_warning(
+                "Could not update parameters due to invalid values:\n\n"
+                f"{error_preview}"
+            )
+            return False
+
+        sweep_names = {sp.name for sp in updated_sweeps}
+        filtered_constants: List[ConstantParameter] = []
+        conflict_names: List[str] = []
+        for cp in updated_constants:
+            if cp.name in sweep_names:
+                conflict_names.append(cp.name)
+            else:
+                filtered_constants.append(cp)
+
+        if conflict_names:
+            preview = ", ".join(conflict_names[:8])
+            suffix = f" (+{len(conflict_names) - 8} more)" if len(conflict_names) > 8 else ""
+            warnings.append(
+                f"Removed {len(conflict_names)} constant(s) that conflict with sweep parameters "
+                f"(sweep kept): {preview}{suffix}."
+            )
+
+        self.sweep_parameters = updated_sweeps
+        self.constant_parameters = filtered_constants
+        warnings.extend(self._enforce_cruise_altitude_sweep_sync())
+        self._refresh_sweep_table()
+        self._refresh_constant_table()
+        self._on_parameters_changed(refresh_const_editor=True)
+        self._log(
+            f"[params-update] sweep={len(self.sweep_parameters)}, constants={len(self.constant_parameters)}, "
+            f"warnings={len(warnings)}"
+        )
+        for warning_msg in warnings:
+            self._log(f"[params-update] {warning_msg}")
+
+        if warnings:
+            warning_preview = "\n".join(f"- {msg}" for msg in warnings[:8])
+            if len(warnings) > 8:
+                warning_preview += f"\n- ... and {len(warnings) - 8} more"
+            self._show_warning(
+                "Parameters updated with conflict handling:\n\n"
+                f"{warning_preview}"
+            )
+        elif show_success:
+            QMessageBox.information(
+                self,
+                "HFCAD GUI",
+                f"Parameters updated.\n\n"
+                f"Sweep parameters: {len(self.sweep_parameters)}\n"
+                f"Constant parameters: {len(self.constant_parameters)}",
+            )
+        return True
 
     def on_add_all_constants_except_sweep(self) -> None:
         if not self.loaded_parameter_items:
@@ -2275,19 +2788,53 @@ class HFCADGui(QMainWindow):
 
         self.constant_parameters = new_constants
         self._refresh_constant_table()
-        self._update_diff_summary()
+        self._on_parameters_changed(refresh_const_editor=True)
         self._log(
             f"[constants-all] total={len(new_constants)}, added={added}, "
             f"kept_existing={kept_existing}, skipped_sweep={skipped_sweep}"
         )
 
     def _refresh_constant_table(self) -> None:
-        self.const_table.setRowCount(len(self.constant_parameters))
-        for i, cp in enumerate(self.constant_parameters):
-            self.const_table.setItem(i, 0, QTableWidgetItem(cp.name))
-            self.const_table.setItem(i, 1, QTableWidgetItem(cp.value))
+        current_row = self.const_table.currentRow()
+        current_col = self.const_table.currentColumn()
+        self._updating_const_table = True
+        self.const_table.blockSignals(True)
+        try:
+            self.const_table.setRowCount(len(self.constant_parameters))
+            for i, cp in enumerate(self.constant_parameters):
+                name_item = QTableWidgetItem(cp.name)
+                name_item.setFlags(name_item.flags() & ~ITEM_IS_EDITABLE)
+                self.const_table.setItem(i, 0, name_item)
+                options = self._parameter_value_options(cp.name, cp.value)
+                if options:
+                    value_item = QTableWidgetItem(cp.value)
+                    value_item.setFlags(value_item.flags() & ~ITEM_IS_EDITABLE)
+                    self.const_table.setItem(i, 1, value_item)
+
+                    combo = NoWheelComboBox()
+                    combo.addItems(options)
+                    selected = self._normalize_choice_value(cp.value, options)
+                    idx = combo.findText(selected)
+                    combo.setCurrentIndex(idx if idx >= 0 else 0)
+                    combo.currentTextChanged.connect(
+                        lambda text, param_name=cp.name: self.on_const_table_combo_value_changed(param_name, text)
+                    )
+                    self.const_table.setCellWidget(i, 1, combo)
+                else:
+                    self.const_table.setCellWidget(i, 1, None)
+                    self.const_table.setItem(i, 1, QTableWidgetItem(cp.value))
+        finally:
+            self.const_table.blockSignals(False)
+            self._updating_const_table = False
+
+        if 0 <= current_row < self.const_table.rowCount():
+            target_col = current_col if 0 <= current_col < self.const_table.columnCount() else 0
+            self.const_table.setCurrentCell(current_row, target_col)
 
     def on_make_input_files(self) -> None:
+        if not self.on_update_params_from_tables(show_success=False):
+            return
+
         template_path = Path(self.template_edit.text().strip()).expanduser()
         out_dir = Path(self.input_out_edit.text().strip()).expanduser()
 
@@ -2299,6 +2846,15 @@ class HFCADGui(QMainWindow):
             template_text = template_path.read_text(encoding="utf-8")
         except Exception as exc:
             self._show_warning(f"Could not read template file:\n{exc}")
+            return
+        template_check = new_config_parser()
+        try:
+            template_check.read_string(template_text)
+        except configparser.Error as exc:
+            self._show_warning(
+                "Template INI has invalid or duplicate entries.\n\n"
+                f"Details: {exc}"
+            )
             return
 
         values_per_parameter: List[List[float]] = []
@@ -2369,6 +2925,15 @@ class HFCADGui(QMainWindow):
             return
 
         out_dir.mkdir(parents=True, exist_ok=True)
+        if not self._maybe_clear_directory_files(
+            out_dir,
+            title="Input Directory Has Existing Files",
+            description="input INI",
+            file_glob="*.ini",
+            recursive=False,
+            clear_all_contents=False,
+        ):
+            return
         self.generated_cases = []
         used_case_names: Dict[str, int] = {}
 
@@ -2393,7 +2958,15 @@ class HFCADGui(QMainWindow):
 
             combo = tuple(combo_values)
             cp = new_config_parser()
-            cp.read_string(template_text)
+            try:
+                cp.read_string(template_text)
+            except configparser.Error as exc:
+                self._show_warning(
+                    "Template INI could not be applied while generating cases.\n\n"
+                    f"Case context: {combo}\n"
+                    f"Details: {exc}"
+                )
+                return
 
             case_diff: Dict[str, str] = {}
             for constant in self.constant_parameters:
@@ -2417,6 +2990,40 @@ class HFCADGui(QMainWindow):
                 cp.write(f)
 
             self.generated_cases.append((case_path, case_diff))
+
+        strict_standards = self.strict_ini_check.isChecked()
+        self._log(
+            f"[generate-check] strict standards mode={'on' if strict_standards else 'off'}."
+        )
+        check_ok, error_count, warning_count, errors, warnings = self._validate_generated_ini_files(
+            strict_standards=strict_standards
+        )
+        for message in warnings:
+            self._log(f"[generate-check] {message}")
+        if warning_count > len(warnings):
+            self._log(f"[generate-check] ... and {warning_count - len(warnings)} more warning(s).")
+
+        if not check_ok:
+            for message in errors:
+                self._log(f"[generate-check] {message}")
+            if error_count > len(errors):
+                self._log(f"[generate-check] ... and {error_count - len(errors)} more error(s).")
+            self.generated_cases = []
+            self._update_diff_summary()
+            preview = "\n".join(f"- {msg}" for msg in errors[:8]) if errors else "- Unknown validation error."
+            if error_count > 8:
+                preview += f"\n- ... and {error_count - 8} more"
+            self._show_warning(
+                "Generated INI safety check failed.\n"
+                "Generated case cache has been cleared; fix issues and regenerate.\n\n"
+                f"{preview}"
+            )
+            return
+
+        if warning_count:
+            self._log(f"[generate-check] completed with {warning_count} warning(s).")
+        else:
+            self._log("[generate-check] all generated INI files passed consistency checks.")
 
         self._update_diff_summary()
         self._log(f"[generate] wrote {len(self.generated_cases)} input files to {out_dir}")
@@ -2449,6 +3056,131 @@ class HFCADGui(QMainWindow):
         else:
             used_names[base_name] = 0
         return name
+
+    def _validate_parameter_value_standard(self, param_name: str, value: str) -> str:
+        if value == "":
+            return f"{param_name}: empty value."
+
+        enum_options = list(ENUM_CONFIG_OPTIONS.get(param_name, ()))
+        if enum_options:
+            normalized = self._normalize_choice_value(value, enum_options)
+            if normalized not in enum_options:
+                options_preview = ", ".join(enum_options[:6])
+                if len(enum_options) > 6:
+                    options_preview += ", ..."
+                return (
+                    f"{param_name}: non-standard value '{value}' "
+                    f"(allowed: {options_preview})."
+                )
+
+        if param_name in BOOL_CONFIG_PARAMS and parse_bool_text(value) is None:
+            return f"{param_name}: non-standard boolean value '{value}'."
+
+        return ""
+
+    def _validate_generated_ini_files(
+        self,
+        *,
+        strict_standards: bool = False,
+        max_reported_issues: int = 20,
+    ) -> Tuple[bool, int, int, List[str], List[str]]:
+        error_count = 0
+        warning_count = 0
+        errors: List[str] = []
+        warnings: List[str] = []
+
+        def add_error(message: str) -> None:
+            nonlocal error_count
+            error_count += 1
+            if len(errors) < max_reported_issues:
+                errors.append(message)
+
+        def add_warning(message: str) -> None:
+            nonlocal warning_count
+            warning_count += 1
+            if len(warnings) < max_reported_issues:
+                warnings.append(message)
+
+        baseline_keys: Optional[set] = None
+        baseline_case = ""
+        for case_path, expected_diff in self.generated_cases:
+            try:
+                text = case_path.read_text(encoding="utf-8")
+            except Exception as exc:
+                add_error(f"{case_path.name}: could not read generated file ({exc}).")
+                continue
+
+            cp = new_config_parser()
+            try:
+                cp.read_string(text)
+            except (configparser.DuplicateSectionError, configparser.DuplicateOptionError) as exc:
+                add_error(f"{case_path.name}: duplicate section/parameter detected ({exc}).")
+                continue
+            except configparser.Error as exc:
+                add_error(f"{case_path.name}: invalid INI format ({exc}).")
+                continue
+
+            actual: Dict[str, str] = {}
+            lowered_to_name: Dict[str, str] = {}
+            for section in cp.sections():
+                if not section.strip():
+                    add_warning(f"{case_path.name}: empty section name encountered.")
+                for key in cp[section].keys():
+                    param_name = f"{section}.{key}"
+                    value = cp[section][key].strip()
+                    actual[param_name] = value
+
+                    lowered = param_name.lower()
+                    prior = lowered_to_name.get(lowered)
+                    if prior is not None and prior != param_name:
+                        add_warning(
+                            f"{case_path.name}: parameter names differ only by case "
+                            f"('{prior}' vs '{param_name}')."
+                        )
+                    else:
+                        lowered_to_name[lowered] = param_name
+
+                    standard_issue = self._validate_parameter_value_standard(param_name, value)
+                    if standard_issue:
+                        message = f"{case_path.name}: {standard_issue}"
+                        if strict_standards:
+                            add_error(message)
+                        else:
+                            add_warning(message)
+
+            keys = set(actual.keys())
+            if baseline_keys is None:
+                baseline_keys = keys
+                baseline_case = case_path.name
+            elif keys != baseline_keys:
+                missing = sorted(baseline_keys - keys)
+                extra = sorted(keys - baseline_keys)
+                details: List[str] = []
+                if missing:
+                    miss_preview = ", ".join(missing[:4])
+                    miss_suffix = " ..." if len(missing) > 4 else ""
+                    details.append(f"missing [{miss_preview}{miss_suffix}]")
+                if extra:
+                    extra_preview = ", ".join(extra[:4])
+                    extra_suffix = " ..." if len(extra) > 4 else ""
+                    details.append(f"extra [{extra_preview}{extra_suffix}]")
+                detail_text = "; ".join(details) if details else "key mismatch"
+                add_error(
+                    f"{case_path.name}: parameter set inconsistent with {baseline_case} ({detail_text})."
+                )
+
+            for param_name, expected_value in expected_diff.items():
+                actual_value = actual.get(param_name)
+                if actual_value is None:
+                    add_error(f"{case_path.name}: missing expected parameter '{param_name}'.")
+                    continue
+                if actual_value != expected_value:
+                    add_error(
+                        f"{case_path.name}: '{param_name}' expected '{expected_value}' "
+                        f"but found '{actual_value}'."
+                    )
+
+        return error_count == 0, error_count, warning_count, errors, warnings
 
     def _update_diff_summary(self) -> None:
         lines: List[str] = []
@@ -2528,6 +3260,15 @@ class HFCADGui(QMainWindow):
             return
 
         out_dir.mkdir(parents=True, exist_ok=True)
+        if not self._maybe_clear_directory_files(
+            out_dir,
+            title="Output Directory Has Existing Files",
+            description="result output",
+            file_glob="*",
+            recursive=True,
+            clear_all_contents=True,
+        ):
+            return
         log_root.mkdir(parents=True, exist_ok=True)
         run_dir = log_root / f"run-{time.strftime('%Y%m%d-%H%M%S')}"
 
@@ -2702,6 +3443,59 @@ class HFCADGui(QMainWindow):
             MESSAGEBOX_NO,
         )
         return reply == MESSAGEBOX_YES
+
+    def _maybe_clear_directory_files(
+        self,
+        directory: Path,
+        *,
+        title: str,
+        description: str,
+        file_glob: str,
+        recursive: bool,
+        clear_all_contents: bool,
+    ) -> bool:
+        if not directory.exists():
+            return True
+
+        file_iter = directory.rglob(file_glob) if recursive else directory.glob(file_glob)
+        existing_files = sorted((p for p in file_iter if p.is_file()), key=lambda p: str(p))
+        if not existing_files:
+            return True
+
+        preview = ", ".join(p.name for p in existing_files[:5])
+        if len(existing_files) > 5:
+            preview += ", ..."
+
+        remove_confirmed = self._confirm_action(
+            title,
+            f"The selected directory already contains {len(existing_files):,} {description} file(s).\n\n"
+            f"Directory: {directory}\n"
+            f"Examples: {preview}\n\n"
+            "Remove existing files before continuing?",
+        )
+        if not remove_confirmed:
+            self._log(
+                f"[cleanup] kept existing files in {directory}; proceeding without deleting old {description} files."
+            )
+            return True
+
+        try:
+            if clear_all_contents:
+                for child in directory.iterdir():
+                    if child.is_dir():
+                        shutil.rmtree(child)
+                    else:
+                        child.unlink()
+            else:
+                for file_path in existing_files:
+                    file_path.unlink()
+        except Exception as exc:
+            self._show_warning(f"Failed to clean directory before continue:\n{directory}\n\n{exc}")
+            return False
+
+        removed_note = "directory contents" if clear_all_contents else f"{description} files"
+        self._log(f"[cleanup] removed existing {removed_note} from {directory}")
+        return True
 
     def _set_stop_button_running_state(self, running: bool) -> None:
         self.stop_btn.setEnabled(running)
